@@ -11,12 +11,28 @@ struct CikeApp: App {
         MenuBarExtra {
             RecommendationPopover(contextMonitor: contextMonitor)
                 .frame(width: 370)
-                .background(.ultraThinMaterial)
         } label: {
-            OpenFocusLogo(lineWidth: 1.45)
-                .frame(width: 18, height: 18)
+            if let image = MenuBarLogo.image {
+                Image(nsImage: image)
+                    .renderingMode(.original)
+                    .frame(width: 18, height: 18)
+            }
         }
         .menuBarExtraStyle(.window)
+    }
+}
+
+private enum MenuBarLogo {
+    @MainActor
+    static var image: NSImage? {
+        let renderer = ImageRenderer(
+            content: OpenFocusLogo(lineWidth: 1.45, color: .white)
+                .frame(width: 18, height: 18)
+        )
+        renderer.scale = 2
+        guard let image = renderer.nsImage else { return nil }
+        image.isTemplate = false
+        return image
     }
 }
 
@@ -276,13 +292,13 @@ private struct RecommendationPopover: View {
             footer.padding(.top, 14)
         }
         .padding(18)
-        .frame(maxHeight: 650, alignment: .top)
+        .fixedSize(horizontal: false, vertical: true)
         .background {
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .fill(.ultraThinMaterial)
-                .overlay(RoundedRectangle(cornerRadius: 22).stroke(.white.opacity(0.72), lineWidth: 1))
         }
-        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .background(PopoverWindowCornerRadius(radius: 18))
     }
 
     private var header: some View {
@@ -372,6 +388,69 @@ private struct ChatUnavailableAdvice: View {
             Text(diagnostic.isEmpty ? "请保持目标聊天窗口在前台，并确认「此刻」拥有辅助功能权限。内容只在本机处理；建议生成后仍由你决定是否使用。" : diagnostic)
                 .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
+    }
+}
+
+private struct PopoverWindowCornerRadius: NSViewRepresentable {
+    var radius: CGFloat
+
+    func makeNSView(context: Context) -> WindowCornerRadiusView {
+        let view = WindowCornerRadiusView()
+        view.radius = radius
+        return view
+    }
+
+    func updateNSView(_ nsView: WindowCornerRadiusView, context: Context) {
+        nsView.radius = radius
+        nsView.updateWindow()
+    }
+}
+
+private final class WindowCornerRadiusView: NSView {
+    var radius: CGFloat = 18
+    private var lastContentSize = NSSize.zero
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        DispatchQueue.main.async { [weak self] in
+            self?.updateWindow()
+        }
+    }
+
+    override func layout() {
+        super.layout()
+        DispatchQueue.main.async { [weak self] in
+            self?.updateWindow()
+        }
+    }
+
+    func updateWindow() {
+        guard let window else { return }
+        window.isOpaque = false
+        window.backgroundColor = .clear
+
+        var views: [NSView] = []
+        var currentView = window.contentView
+        while let view = currentView {
+            views.append(view)
+            currentView = view.superview
+        }
+
+        for view in views {
+            view.wantsLayer = true
+            view.layer?.backgroundColor = NSColor.clear.cgColor
+            view.layer?.cornerRadius = radius
+            view.layer?.cornerCurve = .continuous
+            view.layer?.masksToBounds = true
+        }
+
+        let contentSize = bounds.size
+        guard contentSize.width > 0, contentSize.height > 0,
+              abs(contentSize.width - lastContentSize.width) > 0.5 || abs(contentSize.height - lastContentSize.height) > 0.5
+        else { return }
+
+        lastContentSize = contentSize
+        window.setContentSize(contentSize)
     }
 }
 
