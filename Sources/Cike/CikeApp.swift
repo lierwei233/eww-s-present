@@ -7,10 +7,15 @@ import SwiftUI
 struct CikeApp: App {
     @StateObject private var contextMonitor = ContextMonitor()
     @StateObject private var mealRecommendations = MeituanTopOneStore()
+    @StateObject private var sspaiTopOne = SspaiTopOneStore()
 
     var body: some Scene {
         MenuBarExtra {
-            RecommendationPopover(contextMonitor: contextMonitor, mealRecommendations: mealRecommendations)
+            RecommendationPopover(
+                contextMonitor: contextMonitor,
+                mealRecommendations: mealRecommendations,
+                sspaiTopOne: sspaiTopOne
+            )
                 .frame(width: 370)
         } label: {
             if let image = MenuBarLogo.image {
@@ -79,7 +84,7 @@ private struct OpenFocusLogo: View {
 }
 
 private enum AdviceScene {
-    case lunch, dinner, night, reply, travel, chatPermission, chatUnavailable
+    case lunch, dinner, night, reply, content, chatPermission, chatUnavailable
 
     static func meal(at date: Date, calendar: Calendar = .current) -> AdviceScene? {
         let parts = calendar.dateComponents([.hour, .minute], from: date)
@@ -101,13 +106,13 @@ private enum AdviceScene {
 @MainActor
 private final class ContextMonitor: ObservableObject {
     @Published private(set) var scene: AdviceScene = .reply
+    @Published private(set) var presentedScene: AdviceScene?
     @Published private(set) var replySuggestion: String?
     @Published private(set) var chatDwellSeconds = 0
     @Published private(set) var chatDiagnostic = ""
 
     private let weChatBundleID = "com.tencent.xinWeChat"
     private var weChatBecameActiveAt: Date?
-    private var qualifiedChatAt: Date?
     private var lastContextReadAt: Date?
     private var timer: Timer?
 
@@ -130,31 +135,21 @@ private final class ContextMonitor: ObservableObject {
             let elapsed = Int(now.timeIntervalSince(weChatBecameActiveAt ?? now))
             chatDwellSeconds = elapsed
             if elapsed >= 7 {
-                if qualifiedChatAt == nil { qualifiedChatAt = now }
                 if updateChatSuggestion(now: now) { return }
             }
         } else {
             weChatBecameActiveAt = nil
-            if qualifiedChatAt == nil { chatDwellSeconds = 0 }
+            lastContextReadAt = nil
+            replySuggestion = nil
+            chatDiagnostic = ""
+            chatDwellSeconds = 0
         }
 
-        if let qualifiedChatAt, now.timeIntervalSince(qualifiedChatAt) < 180 {
-            if updateChatSuggestion(now: now) { return }
-        }
-        self.qualifiedChatAt = nil
-        replySuggestion = nil
-        chatDwellSeconds = 0
-
-        if let meal = AdviceScene.meal(at: now) {
+        if let meal = AdviceScene.meal(at: now), canPresent(meal, at: now) {
             setScene(meal)
             return
         }
-
-        if AdviceScene.isHolidayTravelWindow(now) {
-            setScene(.travel)
-        } else {
-            setScene(.reply)
-        }
+        setScene(.content)
     }
 
     @discardableResult
@@ -195,10 +190,57 @@ private final class ContextMonitor: ObservableObject {
         // Avoid publishing every second when the scene has not changed.
         switch (scene, newScene) {
         case (.lunch, .lunch), (.dinner, .dinner), (.night, .night), (.reply, .reply),
-             (.travel, .travel), (.chatPermission, .chatPermission), (.chatUnavailable, .chatUnavailable):
+             (.content, .content), (.chatPermission, .chatPermission), (.chatUnavailable, .chatUnavailable):
             break
         default:
             scene = newScene
+        }
+    }
+
+    func recordPresentation(of scene: AdviceScene, now: Date = .now) {
+        guard let meal = MealPeriod(scene) else { return }
+        let key = mealCountKey(for: meal, at: now)
+        let count = UserDefaults.standard.integer(forKey: key)
+        guard count < 2 else { return }
+        UserDefaults.standard.set(count + 1, forKey: key)
+    }
+
+    func beginPresentation() {
+        let selectedScene = scene
+        presentedScene = selectedScene
+        recordPresentation(of: selectedScene)
+    }
+
+    func endPresentation() {
+        presentedScene = nil
+    }
+
+    private func canPresent(_ scene: AdviceScene, at date: Date) -> Bool {
+        guard let meal = MealPeriod(scene) else { return false }
+        return UserDefaults.standard.integer(forKey: mealCountKey(for: meal, at: date)) < 2
+    }
+
+    private func mealCountKey(for meal: MealPeriod, at date: Date) -> String {
+        let day = Self.dayFormatter.string(from: date)
+        return "Cike.mealPresentation.\(day).\(meal.rawValue)"
+    }
+
+    private static let dayFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.calendar = .current
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter
+    }()
+}
+
+private extension MealPeriod {
+    init?(_ scene: AdviceScene) {
+        switch scene {
+        case .lunch: self = .lunch
+        case .dinner: self = .dinner
+        case .night: self = .night
+        default: return nil
         }
     }
 }
@@ -282,16 +324,18 @@ private enum LocalReplyComposer {
 private struct RecommendationPopover: View {
     @ObservedObject var contextMonitor: ContextMonitor
     @ObservedObject var mealRecommendations: MeituanTopOneStore
+    @ObservedObject var sspaiTopOne: SspaiTopOneStore
+    private var scene: AdviceScene { contextMonitor.presentedScene ?? contextMonitor.scene }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header.padding(.bottom, 16)
-            switch contextMonitor.scene {
+            switch scene {
             case .reply: ReplyAdvice(suggestion: contextMonitor.replySuggestion)
+            case .content: ContentAdvice(article: sspaiTopOne.article, contentStore: sspaiTopOne)
             case .lunch: FoodAdvice(meal: .lunch, mealRecommendations: mealRecommendations)
             case .dinner: FoodAdvice(meal: .dinner, mealRecommendations: mealRecommendations)
             case .night: FoodAdvice(meal: .night, mealRecommendations: mealRecommendations)
-            case .travel: TravelAdvice()
             case .chatPermission: ChatPermissionAdvice(dwell: contextMonitor.chatDwellSeconds, diagnostic: contextMonitor.chatDiagnostic, onEnable: contextMonitor.requestAccessibilityPermission)
             case .chatUnavailable: ChatUnavailableAdvice(diagnostic: contextMonitor.chatDiagnostic)
             }
@@ -304,7 +348,11 @@ private struct RecommendationPopover: View {
                 .fill(.ultraThinMaterial)
         }
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .background(PopoverWindowCornerRadius(radius: 18))
+        .background(PopoverWindowCornerRadius(
+            radius: 18,
+            onPresentation: contextMonitor.beginPresentation,
+            onDismissal: contextMonitor.endPresentation
+        ))
     }
 
     private var header: some View {
@@ -348,16 +396,43 @@ private struct ReplyAdvice: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            eyebrow(suggestion == nil ? "给此刻的一点支持" : "根据微信当前可见对话")
+            eyebrow("根据微信当前可见对话")
             Text(suggestion ?? "先回：「我看到了，给我一点时间想想，晚些回复你。」")
                 .font(.system(size: 20, weight: .semibold))
                 .fixedSize(horizontal: false, vertical: true)
                 .lineSpacing(3)
-            Text(suggestion == nil ? "留出一点空间，也让对方知道你会回应。" : "建议在本机根据当前可见文字生成，不会自动发送。")
+            Text("建议在本机根据当前可见文字生成，不会自动发送。")
                 .font(.system(size: 12)).foregroundStyle(.secondary)
             Divider().padding(.vertical, 3)
             Label("先照顾好自己的感受，再决定下一步。", systemImage: "sparkle")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
+        }
+    }
+}
+
+private struct ContentAdvice: View {
+    var article: SspaiArticle?
+    @ObservedObject var contentStore: SspaiTopOneStore
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            eyebrow(article?.source ?? "此刻发现")
+            Text(article?.title ?? "正在为你找一篇值得读的内容。")
+                .font(.system(size: 20, weight: .semibold))
+                .fixedSize(horizontal: false, vertical: true)
+                .lineSpacing(3)
+            Text(article.map { "一条来自 \($0.source) 的当下推荐。" } ?? "内容加载后会附上原文链接。")
+                .font(.system(size: 12)).foregroundStyle(.secondary)
+            if let article {
+                Link(destination: article.url) {
+                    Label("阅读原文", systemImage: "arrow.up.right")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(GlassActionStyle(isPrimary: true))
+            }
+        }
+        .task {
+            await contentStore.loadRandom()
         }
     }
 }
@@ -399,28 +474,68 @@ private struct ChatUnavailableAdvice: View {
 
 private struct PopoverWindowCornerRadius: NSViewRepresentable {
     var radius: CGFloat
+    var onPresentation: () -> Void
+    var onDismissal: () -> Void
 
     func makeNSView(context: Context) -> WindowCornerRadiusView {
         let view = WindowCornerRadiusView()
         view.radius = radius
+        view.onPresentation = onPresentation
+        view.onDismissal = onDismissal
         return view
     }
 
     func updateNSView(_ nsView: WindowCornerRadiusView, context: Context) {
         nsView.radius = radius
+        nsView.onPresentation = onPresentation
+        nsView.onDismissal = onDismissal
         nsView.updateWindow()
     }
 }
 
 private final class WindowCornerRadiusView: NSView {
     var radius: CGFloat = 18
+    var onPresentation: () -> Void = {}
+    var onDismissal: () -> Void = {}
     private var lastContentSize = NSSize.zero
+    private var observers: [NSObjectProtocol] = []
+    private var isPresented = false
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        installWindowObservers()
         DispatchQueue.main.async { [weak self] in
             self?.updateWindow()
         }
+    }
+
+    private func installWindowObservers() {
+        guard let window, observers.isEmpty else { return }
+        let center = NotificationCenter.default
+        observers = [
+            center.addObserver(forName: NSWindow.didBecomeKeyNotification, object: window, queue: .main) { [weak self] _ in
+                Task { @MainActor in
+                    self?.markPresented()
+                }
+            },
+            center.addObserver(forName: NSWindow.didResignKeyNotification, object: window, queue: .main) { [weak self] _ in
+                Task { @MainActor in
+                    self?.markDismissed()
+                }
+            }
+        ]
+    }
+
+    private func markPresented() {
+        guard !isPresented else { return }
+        isPresented = true
+        onPresentation()
+    }
+
+    private func markDismissed() {
+        guard isPresented else { return }
+        isPresented = false
+        onDismissal()
     }
 
     override func layout() {
