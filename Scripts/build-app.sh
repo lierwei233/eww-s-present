@@ -24,6 +24,7 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>LSUIElement</key><true/>
+    <key>MeituanRecommendationEndpoint</key><string></string>
     <key>NSHighResolutionCapable</key><true/>
 </dict>
 </plist>

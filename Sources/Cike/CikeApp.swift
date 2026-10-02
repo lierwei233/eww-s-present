@@ -6,10 +6,11 @@ import SwiftUI
 @main
 struct CikeApp: App {
     @StateObject private var contextMonitor = ContextMonitor()
+    @StateObject private var mealRecommendations = MeituanTopOneStore()
 
     var body: some Scene {
         MenuBarExtra {
-            RecommendationPopover(contextMonitor: contextMonitor)
+            RecommendationPopover(contextMonitor: contextMonitor, mealRecommendations: mealRecommendations)
                 .frame(width: 370)
         } label: {
             if let image = MenuBarLogo.image {
@@ -20,6 +21,10 @@ struct CikeApp: App {
         }
         .menuBarExtraStyle(.window)
     }
+}
+
+enum MealPeriod: String, Sendable, Hashable {
+    case lunch, dinner, night
 }
 
 private enum MenuBarLogo {
@@ -276,15 +281,16 @@ private enum LocalReplyComposer {
 
 private struct RecommendationPopover: View {
     @ObservedObject var contextMonitor: ContextMonitor
+    @ObservedObject var mealRecommendations: MeituanTopOneStore
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header.padding(.bottom, 16)
             switch contextMonitor.scene {
             case .reply: ReplyAdvice(suggestion: contextMonitor.replySuggestion)
-            case .lunch: FoodAdvice(meal: .lunch)
-            case .dinner: FoodAdvice(meal: .dinner)
-            case .night: FoodAdvice(meal: .night)
+            case .lunch: FoodAdvice(meal: .lunch, mealRecommendations: mealRecommendations)
+            case .dinner: FoodAdvice(meal: .dinner, mealRecommendations: mealRecommendations)
+            case .night: FoodAdvice(meal: .night, mealRecommendations: mealRecommendations)
             case .travel: TravelAdvice()
             case .chatPermission: ChatPermissionAdvice(dwell: contextMonitor.chatDwellSeconds, diagnostic: contextMonitor.chatDiagnostic, onEnable: contextMonitor.requestAccessibilityPermission)
             case .chatUnavailable: ChatUnavailableAdvice(diagnostic: contextMonitor.chatDiagnostic)
@@ -455,8 +461,8 @@ private final class WindowCornerRadiusView: NSView {
 }
 
 private struct FoodAdvice: View {
-    enum Meal { case lunch, dinner, night }
-    let meal: Meal
+    let meal: MealPeriod
+    @ObservedObject var mealRecommendations: MeituanTopOneStore
 
     private var title: String {
         switch meal {
@@ -495,6 +501,7 @@ private struct FoodAdvice: View {
     }
 
     var body: some View {
+        let topOne = mealRecommendations.topOne(for: meal)
         VStack(alignment: .leading, spacing: 11) {
             eyebrow(meal == .lunch ? "午餐时间 · 给你一个选择" : meal == .dinner ? "晚餐时间 · 给你一个选择" : "夜宵时间 · 给你一个选择")
             Text(title)
@@ -502,17 +509,17 @@ private struct FoodAdvice: View {
             Text(timeHint)
                 .font(.system(size: 12)).foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 8) {
-                Text(order)
+                Text(topOne?.itemName ?? order)
                     .font(.system(size: 14, weight: .semibold))
-                Text(description)
+                Text(topOne?.description ?? description)
                     .font(.system(size: 10)).foregroundStyle(.secondary)
                 HStack(alignment: .firstTextBaseline) {
-                    Text(price).font(.system(size: 19, weight: .semibold))
+                    Text(topOne?.priceText ?? price).font(.system(size: 19, weight: .semibold))
                     Spacer()
-                    Text("预计送达 25–35 分钟").font(.system(size: 10)).foregroundStyle(.secondary)
+                    Text(topOne?.deliveryText ?? "预计送达 25–35 分钟").font(.system(size: 10)).foregroundStyle(.secondary)
                 }
                 HStack(spacing: 8) {
-                    Link(destination: URL(string: "https://waimai.meituan.com/")!) {
+                    Link(destination: topOne?.landingURL ?? URL(string: "https://waimai.meituan.com/")!) {
                         Label("打开美团外卖", systemImage: "arrow.up.right").frame(maxWidth: .infinity)
                     }
                     .buttonStyle(GlassActionStyle(isPrimary: true))
@@ -524,8 +531,11 @@ private struct FoodAdvice: View {
             }
             .padding(13)
             .background(.white.opacity(0.38), in: RoundedRectangle(cornerRadius: 14))
-            Text("商家、价格和距离需接入定位及平台后实时提供。")
+            Text(topOne?.statusText ?? "示例推荐；商家、价格和距离需接入定位及平台后实时提供。")
                 .font(.system(size: 9)).foregroundStyle(.tertiary)
+        }
+        .task(id: meal) {
+            await mealRecommendations.loadTopOne(for: meal)
         }
     }
 }
