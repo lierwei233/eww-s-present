@@ -1,6 +1,10 @@
 import Combine
 import Foundation
 
+enum ContentLoadResult: Equatable {
+    case loaded, exhausted, unavailable
+}
+
 /// Rotates one public, editorially selected article between several sources.
 /// It uses public feeds and home pages only; no browser cookies or account data are read.
 @MainActor
@@ -11,8 +15,8 @@ final class SspaiTopOneStore: ObservableObject {
     private let sourceRotationVersionKey = "Cike.contentSourceRotationVersion"
     private var isLoading = false
 
-    func loadNext() async {
-        guard !isLoading else { return }
+    func loadNext() async -> ContentLoadResult {
+        guard !isLoading else { return .unavailable }
         isLoading = true
         defer { isLoading = false }
 
@@ -26,24 +30,20 @@ final class SspaiTopOneStore: ObservableObject {
             start = UserDefaults.standard.integer(forKey: sourceCursorKey) % sources.count
         }
         let ordered = (0..<sources.count).map { sources[(start + $0) % sources.count] }
-        var fallback: (ContentSource, SspaiArticle)?
         var chosen: (ContentSource, SspaiArticle)?
+        var foundContent = false
         let seen = Set(UserDefaults.standard.stringArray(forKey: seenURLsKey) ?? [])
         for source in ordered {
             let articles = await source.loadArticles()
-            guard let first = articles.first else { continue }
-            fallback = fallback ?? (source, first)
+            guard !articles.isEmpty else { continue }
+            foundContent = true
             if let article = articles.first(where: { !seen.contains($0.url.absoluteString) }) {
                 chosen = (source, article)
                 break
             }
         }
         var seenURLs = UserDefaults.standard.stringArray(forKey: seenURLsKey) ?? []
-        if chosen == nil, let fallback {
-            seenURLs.removeAll()
-            chosen = fallback
-        }
-        guard let (source, next) = chosen else { return }
+        guard let (source, next) = chosen else { return foundContent ? .exhausted : .unavailable }
 
         seenURLs.append(next.url.absoluteString)
         UserDefaults.standard.set(Array(seenURLs.suffix(80)), forKey: seenURLsKey)
@@ -56,9 +56,10 @@ final class SspaiTopOneStore: ObservableObject {
 
         if source == .sspai {
             let details = await articleDetails(at: next.url)
-            guard article?.url == next.url else { return }
+            guard article?.url == next.url else { return .loaded }
             article = displayArticle.with(details: details)
         }
+        return .loaded
     }
 
     private func articleDetails(at url: URL) async -> SspaiArticle.Details {

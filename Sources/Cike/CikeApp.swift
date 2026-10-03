@@ -107,10 +107,23 @@ private enum AdviceScene {
         return nil
     }
 
-    static func isHolidayTravelWindow(_ date: Date, calendar: Calendar = .current) -> Bool {
+    static func holidayName(at date: Date, calendar: Calendar = .current) -> String? {
         let parts = calendar.dateComponents([.month, .day], from: date)
-        guard let month = parts.month, let day = parts.day else { return false }
-        return (month == 9 && day >= 20) || (month == 10 && day <= 7)
+        guard let month = parts.month, let day = parts.day else { return nil }
+        if month == 10 && (1...7).contains(day) { return "国庆" }
+        if month == 5 && (1...5).contains(day) { return "五一" }
+        if month == 4 && (4...6).contains(day) { return "清明" }
+        if month == 1 && (1...3).contains(day) { return "元旦" }
+
+        let lunar = Calendar(identifier: .chinese).dateComponents([.month, .day], from: date)
+        if lunar.month == 1 && (1...7).contains(lunar.day ?? 0) { return "春节" }
+        if lunar.month == 5 && lunar.day == 5 { return "端午" }
+        if lunar.month == 8 && lunar.day == 15 { return "中秋" }
+        return nil
+    }
+
+    static func travelTitle(at date: Date) -> String {
+        "\(holidayName(at: date) ?? "假日")出游灵感"
     }
 }
 
@@ -123,6 +136,7 @@ private final class ContextMonitor: ObservableObject {
     @Published private(set) var chatDiagnostic = ""
 
     private let weChatBundleID = "com.tencent.xinWeChat"
+    private let travelPreviewKey = "Cike.previewTravelRecommendation"
     private var weChatBecameActiveAt: Date?
     private var lastContextReadAt: Date?
     private var timer: Timer?
@@ -140,6 +154,10 @@ private final class ContextMonitor: ObservableObject {
     }
 
     private func refresh(now: Date = .now) {
+        if UserDefaults.standard.bool(forKey: travelPreviewKey) {
+            setScene(.travel)
+            return
+        }
         let isWeChatFrontmost = NSWorkspace.shared.frontmostApplication?.bundleIdentifier == weChatBundleID
         if isWeChatFrontmost {
             if weChatBecameActiveAt == nil { weChatBecameActiveAt = now }
@@ -219,7 +237,16 @@ private final class ContextMonitor: ObservableObject {
         let selectedScene = scene
         presentedScene = selectedScene
         recordPresentation(of: selectedScene)
+        if selectedScene == .travel {
+            UserDefaults.standard.removeObject(forKey: travelPreviewKey)
+        }
         return selectedScene
+    }
+
+    func showTravelWhenHolidayContentIsExhausted() {
+        guard AdviceScene.holidayName(at: .now) != nil else { return }
+        scene = .travel
+        presentedScene = .travel
     }
 
     func endPresentation() {
@@ -375,7 +402,11 @@ private struct RecommendationPopover: View {
 
     private func beginPresentation() {
         if contextMonitor.beginPresentation() == .content {
-            Task { await sspaiTopOne.loadNext() }
+            Task {
+                if await sspaiTopOne.loadNext() == .exhausted {
+                    contextMonitor.showTravelWhenHolidayContentIsExhausted()
+                }
+            }
         }
     }
 
@@ -404,7 +435,7 @@ private struct RecommendationPopover: View {
         case .afternoonTea: "来一份下午茶吧"
         case .dinner: "来一份晚餐吧"
         case .night: "来一份夜宵吧"
-        case .travel: "留一段好旅程慢慢走"
+        case .travel: AdviceScene.travelTitle(at: .now)
         case .reply: "留一句合适的话慢慢回"
         case .chatPermission, .chatUnavailable: "先听听你心里的话"
         }
@@ -674,7 +705,6 @@ private struct TravelAdvice: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            eyebrow("国庆假期将近 · 出游灵感")
             Text("去杭州，慢慢逛两天。")
                 .font(.system(size: 18, weight: .semibold))
                 .foregroundStyle(CikePalette.primaryText)
@@ -716,8 +746,6 @@ private struct TravelAdvice: View {
                 Label("在地图中查看行程", systemImage: "map").frame(maxWidth: .infinity)
             }
             .buttonStyle(GlassActionStyle(isPrimary: true))
-            Text("示例计划；车次、房价、门票与偏好需接入数据后确认。")
-                .font(.system(size: 8)).foregroundStyle(.tertiary)
         }
     }
 
