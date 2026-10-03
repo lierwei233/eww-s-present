@@ -1,65 +1,130 @@
 import Combine
 import Foundation
 
-/// Reads one article from the public recommendation list on sspai.com.
-/// It deliberately does not access browser cookies or account-specific data.
+/// Rotates one public, editorially selected article between several sources.
+/// It uses public feeds and home pages only; no browser cookies or account data are read.
 @MainActor
 final class SspaiTopOneStore: ObservableObject {
     @Published private(set) var article: SspaiArticle?
-    private var isLoading = false
     private let seenURLsKey = "Cike.shownContentURLs"
+    private let sourceCursorKey = "Cike.contentSourceCursor"
+    private var isLoading = false
 
     func loadNext() async {
         guard !isLoading else { return }
         isLoading = true
         defer { isLoading = false }
-        await loadSspai()
-    }
 
-    private func loadSspai() async {
-        var request = URLRequest(url: URL(string: "https://sspai.com/")!)
-        request.timeoutInterval = 10
-        request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/605.1.15 Safari/605.1.15", forHTTPHeaderField: "User-Agent")
-        request.setValue("text/html,application/xhtml+xml", forHTTPHeaderField: "Accept")
+        let sources = ContentSource.allCases
+        let start = UserDefaults.standard.integer(forKey: sourceCursorKey) % sources.count
+        let ordered = (0..<sources.count).map { sources[(start + $0) % sources.count] }
+        var candidates: [(ContentSource, [SspaiArticle])] = []
+        for source in ordered {
+            let articles = await source.loadArticles()
+            if !articles.isEmpty { candidates.append((source, articles)) }
+        }
+        guard !candidates.isEmpty else { return }
 
-        do {
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode),
-                  let html = String(data: data, encoding: .utf8) else { return }
-            let candidates = SspaiArticle.parseAll(from: html)
-            guard !candidates.isEmpty else { return }
+        var seenURLs = UserDefaults.standard.stringArray(forKey: seenURLsKey) ?? []
+        let seen = Set(seenURLs)
+        var chosen = candidates.lazy
+            .compactMap { source, articles in articles.first(where: { !seen.contains($0.url.absoluteString) }).map { (source, $0) } }
+            .first
+        if chosen == nil, let first = candidates.first, let article = first.1.first {
+            seenURLs.removeAll()
+            chosen = (first.0, article)
+        }
+        guard let (source, next) = chosen else { return }
 
-            var seenURLs = UserDefaults.standard.stringArray(forKey: seenURLsKey) ?? []
-            let seen = Set(seenURLs)
-            let next = candidates.first(where: { !seen.contains($0.url.absoluteString) }) ?? candidates[0]
-            if seen.contains(next.url.absoluteString) {
-                seenURLs.removeAll()
-            }
-            seenURLs.append(next.url.absoluteString)
-            UserDefaults.standard.set(Array(seenURLs.suffix(50)), forKey: seenURLsKey)
-            article = next
+        seenURLs.append(next.url.absoluteString)
+        UserDefaults.standard.set(Array(seenURLs.suffix(80)), forKey: seenURLsKey)
+        UserDefaults.standard.set((source.index + 1) % sources.count, forKey: sourceCursorKey)
+        article = next
+
+        if source == .sspai {
             let details = await articleDetails(at: next.url)
             guard article?.url == next.url else { return }
             article = next.with(details: details)
-        } catch {
-            // The recommendation view keeps its original local suggestion on a network failure.
+        } else if source == .quanta, let translatedTitle = await ContentSource.translateQuantaTitle(next.title) {
+            guard article?.url == next.url else { return }
+            article = next.with(title: translatedTitle)
         }
     }
 
     private func articleDetails(at url: URL) async -> SspaiArticle.Details {
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 10
-        request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/605.1.15 Safari/605.1.15", forHTTPHeaderField: "User-Agent")
-        do {
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode),
-                  let html = String(data: data, encoding: .utf8) else { return .empty }
-            return SspaiArticle.Details.parse(from: html)
-        } catch {
-            return .empty
+        guard let html = await ContentSource.loadHTML(from: url) else { return .empty }
+        return SspaiArticle.Details.parse(from: html)
+    }
+}
+
+private enum ContentSource: CaseIterable {
+    case sspai, quanta
+
+    var index: Int { Self.allCases.firstIndex(of: self) ?? 0 }
+
+    func loadArticles() async -> [SspaiArticle] {
+        switch self {
+        case .sspai:
+            guard let html = await Self.loadHTML(from: URL(string: "https://sspai.com/")!) else { return [] }
+            return SspaiArticle.parseAll(from: html)
+        case .quanta:
+            guard let html = await Self.loadHTML(from: URL(string: "https://www.quantamagazine.org/")!) else { return [] }
+            return Self.parseQuantaCards(html)
         }
     }
 
+    static func loadHTML(from url: URL) async -> String? {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 7
+        request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/605.1.15 Safari/605.1.15", forHTTPHeaderField: "User-Agent")
+        request.setValue("text/html,application/xhtml+xml,application/xml", forHTTPHeaderField: "Accept")
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else { return nil }
+            return String(data: data, encoding: .utf8)
+        } catch {
+            return nil
+        }
+    }
+
+    static func parseQuantaCards(_ html: String) -> [SspaiArticle] {
+        let cardPattern = #"<a\b[^>]*href=[\"']([^\"']+)[\"'][^>]*>(?:(?!</a>)[\s\S])*?<h[2-4]\b[^>]*>([\s\S]*?)</h[2-4]>"#
+        let matches = SspaiArticle.allMatches(cardPattern, in: html)
+        var output: [SspaiArticle] = []
+        var used = Set<String>()
+        for match in matches where match.count == 3 {
+            guard let url = URL(string: match[1], relativeTo: URL(string: "https://www.quantamagazine.org"))?.absoluteURL,
+                  url.host == "www.quantamagazine.org" else { continue }
+            let title = SspaiArticle.htmlText(match[2])
+            guard title.count >= 12, title.count <= 180, used.insert(url.absoluteString).inserted else { continue }
+            output.append(SspaiArticle(title: title, url: url, source: "Quanta Magazine", coverURL: nil))
+            if output.count == 8 { break }
+        }
+        return output
+    }
+
+    static func translateQuantaTitle(_ title: String) async -> String? {
+        var components = URLComponents(string: "https://api.mymemory.translated.net/get")
+        components?.queryItems = [
+            URLQueryItem(name: "q", value: title),
+            URLQueryItem(name: "langpair", value: "en|zh-CN")
+        ]
+        guard let url = components?.url else { return nil }
+        do {
+            let (data, response) = try await URLSession.shared.data(from: url)
+            guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else { return nil }
+            let result = try JSONDecoder().decode(TranslationResponse.self, from: data)
+            let translated = result.responseData.translatedText.trimmingCharacters(in: .whitespacesAndNewlines)
+            return translated.isEmpty ? nil : translated
+        } catch {
+            return nil
+        }
+    }
+
+    private struct TranslationResponse: Decodable {
+        struct ResponseData: Decodable { let translatedText: String }
+        let responseData: ResponseData
+    }
 }
 
 struct SspaiArticle {
@@ -81,20 +146,14 @@ struct SspaiArticle {
         self.readingTime = readingTime
     }
 
-    var metadataText: String {
-        [source, date, author, readingTime].compactMap { $0 }.joined(separator: " · ")
-    }
+    var metadataText: String { [source, date, author, readingTime].compactMap { $0 }.joined(separator: " · ") }
 
     func with(details: Details) -> SspaiArticle {
-        SspaiArticle(
-            title: title,
-            url: url,
-            source: source,
-            coverURL: coverURL,
-            date: details.date,
-            author: details.author,
-            readingTime: details.readingTime
-        )
+        SspaiArticle(title: title, url: url, source: source, coverURL: coverURL, date: details.date, author: details.author, readingTime: details.readingTime)
+    }
+
+    func with(title: String) -> SspaiArticle {
+        SspaiArticle(title: title, url: url, source: source, coverURL: coverURL, date: date, author: author, readingTime: readingTime)
     }
 
     static func parseAll(from html: String) -> [SspaiArticle] {
@@ -108,23 +167,14 @@ struct SspaiArticle {
     private static func parseCard(_ body: String) -> SspaiArticle? {
         let hrefPattern = #"<a\b(?=[^>]*\bclass=[\"'][^\"']*article__card__link[^\"']*[\"'])(?=[^>]*\bhref=[\"']([^\"']+)[\"'])[^>]*>"#
         guard let hrefMatch = firstMatch(hrefPattern, in: body), hrefMatch.count == 2 else { return nil }
-        let href = hrefMatch[1]
         let titlePattern = #"<p\b[^>]*\bclass=[\"'][^\"']*article__card__title[^\"']*[\"'][^>]*>([\s\S]*?)</p>"#
         guard let titleMatch = firstMatch(titlePattern, in: body), titleMatch.count == 2 else { return nil }
-
         let title = htmlText(titleMatch[1])
-        guard !title.isEmpty, let url = URL(string: href, relativeTo: URL(string: "https://sspai.com"))?.absoluteURL else { return nil }
-        let coverPattern = #"<div\b(?=[^>]*\bclass=[\"'][^\"']*article__card__cover[^\"']*[\"'])[^>]*>[\s\S]*?<img\b[^>]*(?:\bdata-src|\bsrc)=[\"']([^\"']+)[\"']"#
-        let coverURL: URL?
-        if let match = firstMatch(coverPattern, in: body), match.count > 1 {
-            coverURL = URL(string: match[1])
-        } else {
-            coverURL = nil
-        }
-        return SspaiArticle(title: title, url: url, source: "少数派", coverURL: coverURL)
+        guard !title.isEmpty, let url = URL(string: hrefMatch[1], relativeTo: URL(string: "https://sspai.com"))?.absoluteURL else { return nil }
+        return SspaiArticle(title: title, url: url, source: "少数派", coverURL: nil)
     }
 
-    private static func firstMatch(_ pattern: String, in text: String) -> [String]? {
+    static func firstMatch(_ pattern: String, in text: String) -> [String]? {
         guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return nil }
         let range = NSRange(text.startIndex..., in: text)
         guard let match = regex.firstMatch(in: text, range: range) else { return nil }
@@ -134,7 +184,7 @@ struct SspaiArticle {
         }
     }
 
-    private static func allMatches(_ pattern: String, in text: String) -> [[String]] {
+    static func allMatches(_ pattern: String, in text: String) -> [[String]] {
         guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return [] }
         let range = NSRange(text.startIndex..., in: text)
         return regex.matches(in: text, range: range).map { match in
@@ -145,14 +195,14 @@ struct SspaiArticle {
         }
     }
 
-    private static func htmlText(_ value: String) -> String {
+    static func htmlText(_ value: String) -> String {
         let withoutTags = value.replacingOccurrences(of: #"<[^>]+>"#, with: " ", options: .regularExpression)
-        let entities = withoutTags
+        return withoutTags
             .replacingOccurrences(of: "&nbsp;", with: " ")
             .replacingOccurrences(of: "&amp;", with: "&")
             .replacingOccurrences(of: "&quot;", with: "\"")
             .replacingOccurrences(of: "&#39;", with: "'")
-        return entities.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
@@ -160,7 +210,6 @@ struct SspaiArticle {
         let date: String?
         let author: String?
         let readingTime: String?
-
         static let empty = Details(date: nil, author: nil, readingTime: nil)
 
         static func parse(from html: String) -> Details {
@@ -173,8 +222,51 @@ struct SspaiArticle {
 
         private static func firstText(_ pattern: String, in html: String) -> String? {
             guard let match = firstMatch(pattern, in: html), match.count > 1 else { return nil }
-            let text = htmlText(match[1])
-            return text.isEmpty ? nil : text
+            let text = htmlText(match[1]); return text.isEmpty ? nil : text
         }
+    }
+}
+
+private final class RSSParser: NSObject, XMLParserDelegate {
+    struct Item { var title: String?; var link: String?; var date: String?; var imageURL: URL? }
+    private var items: [Item] = []
+    private var item: Item?
+    private var element = ""
+    private var text = ""
+
+    static func parse(_ xml: String) -> [Item] {
+        let parser = XMLParser(data: Data(xml.utf8))
+        let delegate = RSSParser()
+        parser.delegate = delegate
+        parser.parse()
+        return delegate.items
+    }
+
+    func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?, qualifiedName qName: String?, attributes attributeDict: [String : String] = [:]) {
+        element = elementName.lowercased()
+        text = ""
+        if element == "item" || element == "entry" { item = Item() }
+        if (element == "media:content" || element == "enclosure"), let value = attributeDict["url"], item?.imageURL == nil {
+            item?.imageURL = URL(string: value)
+        }
+    }
+
+    func parser(_ parser: XMLParser, foundCharacters string: String) { text += string }
+
+    func parser(_ parser: XMLParser, didEndElement elementName: String, namespaceURI: String?, qualifiedName qName: String?) {
+        guard var current = item else { return }
+        let value = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch elementName.lowercased() {
+        case "title": if current.title == nil { current.title = value }
+        case "link": if current.link == nil { current.link = value }
+        case "guid": if current.link == nil { current.link = value }
+        case "pubdate", "published", "updated": if current.date == nil { current.date = value }
+        case "item", "entry":
+            if current.title != nil, current.link != nil { items.append(current) }
+            item = nil
+            return
+        default: break
+        }
+        item = current
     }
 }
