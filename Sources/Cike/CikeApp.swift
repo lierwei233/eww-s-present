@@ -29,7 +29,7 @@ struct CikeApp: App {
 }
 
 enum MealPeriod: String, Sendable, Hashable {
-    case lunch, dinner, night
+    case lunch, afternoonTea, dinner, night
 }
 
 private enum CikePalette {
@@ -94,13 +94,14 @@ private struct OpenFocusLogo: View {
 }
 
 private enum AdviceScene {
-    case lunch, dinner, night, reply, content, travel, chatPermission, chatUnavailable
+    case lunch, afternoonTea, dinner, night, reply, content, travel, chatPermission, chatUnavailable
 
     static func meal(at date: Date, calendar: Calendar = .current) -> AdviceScene? {
         let parts = calendar.dateComponents([.hour, .minute], from: date)
         guard let hour = parts.hour, let minute = parts.minute else { return nil }
         let time = hour * 60 + minute
         if (11 * 60 + 30)..<(13 * 60 + 30) ~= time { return .lunch }
+        if (15 * 60)..<(16 * 60) ~= time { return .afternoonTea }
         if (16 * 60 + 30)..<(19 * 60 + 30) ~= time { return .dinner }
         if time >= 22 * 60 || time < 60 { return .night }
         return nil
@@ -197,7 +198,7 @@ private final class ContextMonitor: ObservableObject {
     private func setScene(_ newScene: AdviceScene) {
         // Avoid publishing every second when the scene has not changed.
         switch (scene, newScene) {
-        case (.lunch, .lunch), (.dinner, .dinner), (.night, .night), (.reply, .reply),
+        case (.lunch, .lunch), (.afternoonTea, .afternoonTea), (.dinner, .dinner), (.night, .night), (.reply, .reply),
              (.content, .content), (.chatPermission, .chatPermission), (.chatUnavailable, .chatUnavailable):
             break
         default:
@@ -248,6 +249,7 @@ private extension MealPeriod {
     init?(_ scene: AdviceScene) {
         switch scene {
         case .lunch: self = .lunch
+        case .afternoonTea: self = .afternoonTea
         case .dinner: self = .dinner
         case .night: self = .night
         default: return nil
@@ -344,6 +346,7 @@ private struct RecommendationPopover: View {
             case .reply: ReplyAdvice(suggestion: contextMonitor.replySuggestion)
             case .content: ContentAdvice(article: sspaiTopOne.article, contentStore: sspaiTopOne)
             case .lunch: FoodAdvice(meal: .lunch, mealRecommendations: mealRecommendations)
+            case .afternoonTea: FoodAdvice(meal: .afternoonTea, mealRecommendations: mealRecommendations)
             case .dinner: FoodAdvice(meal: .dinner, mealRecommendations: mealRecommendations)
             case .night: FoodAdvice(meal: .night, mealRecommendations: mealRecommendations)
             case .travel: TravelAdvice()
@@ -397,7 +400,10 @@ private struct RecommendationPopover: View {
     private var subtitle: String {
         switch scene {
         case .content: "留一篇好内容慢慢读"
-        case .lunch, .dinner, .night: "留一顿好饭慢慢吃"
+        case .lunch: "来一份午餐吧"
+        case .afternoonTea: "来一份下午茶吧"
+        case .dinner: "来一份晚餐吧"
+        case .night: "来一份夜宵吧"
         case .travel: "留一段好旅程慢慢走"
         case .reply: "留一句合适的话慢慢回"
         case .chatPermission, .chatUnavailable: "先听听你心里的话"
@@ -610,37 +616,18 @@ private struct FoodAdvice: View {
     let meal: MealPeriod
     @ObservedObject var mealRecommendations: MeituanTopOneStore
 
-    private var title: String {
-        switch meal {
-        case .lunch: "午餐，吃份鸡腿饭吧。"
-        case .dinner: "晚餐，来份热乎的牛肉饭。"
-        case .night: "夜宵，吃碗馄饨吧。"
-        }
-    }
-    private var timeHint: String {
-        switch meal {
-        case .lunch: "午间好好吃饭，下午继续有精神。"
-        case .dinner: "一份扎实的晚餐，今晚就选它。"
-        case .night: "一份刚刚好的热汤，不用再纠结。"
-        }
-    }
     private var order: String {
         switch meal {
         case .lunch: "照烧鸡腿饭 + 时蔬"
+        case .afternoonTea: "燕麦拿铁 + 黄油可颂"
         case .dinner: "番茄牛腩饭"
         case .night: "鲜肉小馄饨 + 紫菜蛋皮"
-        }
-    }
-    private var description: String {
-        switch meal {
-        case .lunch: "荤素搭配 · 午餐一份刚刚好"
-        case .dinner: "热乎饱腹 · 晚餐不用再挑"
-        case .night: "清爽热汤 · 适合夜里垫垫肚子"
         }
     }
     private var price: String {
         switch meal {
         case .lunch: "示例 ¥29"
+        case .afternoonTea: "示例 ¥28"
         case .dinner: "示例 ¥36"
         case .night: "示例 ¥22"
         }
@@ -649,20 +636,12 @@ private struct FoodAdvice: View {
     var body: some View {
         let topOne = mealRecommendations.topOne(for: meal)
         VStack(alignment: .leading, spacing: 11) {
-            eyebrow(meal == .lunch ? "午餐时间 · 给你一个选择" : meal == .dinner ? "晚餐时间 · 给你一个选择" : "夜宵时间 · 给你一个选择")
-            Text(title)
-                .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(CikePalette.primaryText)
-            Text(timeHint)
-                .font(.system(size: 12)).foregroundStyle(.secondary)
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 12) {
                 Text(topOne?.itemName ?? order)
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(CikePalette.primaryText)
-                Text(topOne?.description ?? description)
-                    .font(.system(size: 10)).foregroundStyle(.secondary)
                 HStack(alignment: .firstTextBaseline) {
-                    Text(topOne?.priceText ?? price).font(.system(size: 19, weight: .semibold)).foregroundStyle(CikePalette.primaryText)
+                    Text(topOne?.priceText ?? price).font(.system(size: 20, weight: .semibold)).foregroundStyle(CikePalette.primaryText)
                     Spacer()
                     Text(topOne?.deliveryText ?? "预计送达 25–35 分钟").font(.system(size: 10)).foregroundStyle(.secondary)
                 }
@@ -671,7 +650,7 @@ private struct FoodAdvice: View {
                         Label("打开美团外卖", systemImage: "arrow.up.right").frame(maxWidth: .infinity)
                     }
                     .buttonStyle(GlassActionStyle(isPrimary: true))
-                    Link(destination: URL(string: "https://maps.apple.com/?q=馄饨")!) {
+                    Link(destination: URL(string: meal == .afternoonTea ? "https://maps.apple.com/?q=咖啡" : "https://maps.apple.com/?q=馄饨")!) {
                         Label("附近堂食", systemImage: "location").frame(maxWidth: .infinity)
                     }
                     .buttonStyle(GlassActionStyle())
@@ -679,8 +658,6 @@ private struct FoodAdvice: View {
             }
             .padding(13)
             .background(CikePalette.cardSurface, in: RoundedRectangle(cornerRadius: 14))
-            Text(topOne?.statusText ?? "示例推荐；商家、价格和距离需接入定位及平台后实时提供。")
-                .font(.system(size: 9)).foregroundStyle(.tertiary)
         }
         .task(id: meal) {
             await mealRecommendations.loadTopOne(for: meal)
