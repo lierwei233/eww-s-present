@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>此刻 · 配色预览</title>
+  <style>
+    :root { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", sans-serif; color: #303236; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; background: #e8ebed; }
+    .backdrop { position: fixed; inset: 0; background: radial-gradient(circle at 18% 8%, #fffdf9 0 7%, transparent 38%), radial-gradient(circle at 92% 70%, #cfdade 0 3%, transparent 42%), linear-gradient(135deg, #d7dfe2, #eef0ef 50%, #d7dcdc); }
+    .backdrop::after { content: ""; position: absolute; inset: 0; backdrop-filter: blur(16px); background: #ffffff15; }
+    main { position: relative; max-width: 1010px; margin: 0 auto; padding: 54px 28px 64px; }
+    .eyebrow { color: #7f878c; font-size: 10px; font-weight: 650; letter-spacing: .13em; }
+    h1 { margin: 9px 0 8px; font-size: 29px; line-height: 1.15; letter-spacing: -1px; font-weight: 650; }
+    .intro { margin: 0; color: #737b81; font-size: 13px; }
+    .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; margin-top: 30px; }
+    .option { min-width: 0; padding: 16px; border: 1px solid #ffffffa8; border-radius: 23px; background: #ffffff47; box-shadow: 0 18px 42px #4d5a6015; }
+    .option-head { display: flex; align-items: baseline; justify-content: space-between; margin: 1px 2px 13px; }
+    .option-title { font-size: 13px; font-weight: 650; letter-spacing: -.2px; }
+    .option-note { color: #858d91; font-size: 10px; }
+    .preview { position: relative; overflow: hidden; min-height: 300px; padding: 18px; border-radius: 18px; color: var(--ink); background: var(--surface); border: 1px solid var(--edge); box-shadow: 0 12px 30px var(--shadow), inset 0 1px 0 var(--shine); backdrop-filter: blur(28px) saturate(115%); }
+    .preview::before { content: ""; position: absolute; inset: 0; pointer-events: none; background: linear-gradient(130deg, #fff7 0%, transparent 40%, #fff3 100%); }
+    .content { position: relative; }
+    .header { display: flex; align-items: center; gap: 9px; }
+    .logo { width: 29px; height: 29px; padding: 6px; border-radius: 9px; background: var(--logo-bg); }
+    .logo svg { width: 100%; height: 100%; stroke: var(--muted); }
+    .brand { font-size: 14px; font-weight: 650; letter-spacing: -.2px; } .brand span { color: var(--muted); font-size: 12px; font-weight: 400; }
+    .time { margin-left: auto; color: var(--faint); font-size: 10px; font-weight: 600; }
+    .kicker { margin-top: 27px; color: var(--muted); font-size: 10px; font-weight: 600; letter-spacing: .03em; }
+    h2 { margin: 8px 0; font-size: 21px; line-height: 1.15; letter-spacing: -.7px; }
+    .sub { color: var(--muted); font-size: 12px; }
+    .article { display: grid; grid-template-columns: 92px 1fr; gap: 11px; margin-top: 17px; padding: 10px; border-radius: 13px; background: var(--card); border: 1px solid var(--card-edge); }
+    .cover { min-height: 78px; border-radius: 9px; background: var(--cover); }
+    .article-title { font-size: 13px; line-height: 1.35; font-weight: 650; letter-spacing: -.25px; }
+    .article-source { margin-top: 6px; color: var(--muted); font-size: 10px; }
+    .button { margin-top: 8px; padding: 7px 9px; border-radius: 8px; color: var(--button-text); background: var(--button); font-size: 10px; font-weight: 600; text-align: center; }
+    .footer { display: flex; gap: 6px; align-items: center; margin-top: 16px; color: var(--faint); font-size: 9px; } .dot { width: 4px; height: 4px; border-radius: 50%; background: var(--faint); }
+    .mist { --surface: #f5f6f6bd; --edge: #ffffffb3; --shadow: #51606b19; --shine: #fff9; --ink: #3d4145; --muted: #737a80; --faint: #a1a7ab; --logo-bg: #ffffffab; --card: #ffffff75; --card-edge: #ffffff95; --cover: linear-gradient(135deg,#ccd9dc,#eff2ed 54%,#b6c9cd); --button: #54595d; --button-text: #fff; }
+    .cloud { --surface: #f5f5f6c9; --edge: #ffffffc5; --shadow: #4b4b5714; --shine: #fff9; --ink: #424245; --muted: #7a7b80; --faint: #adaeb2; --logo-bg: #ffffffc4; --card: #ffffff91; --card-edge: #ffffffc2; --cover: linear-gradient(135deg,#dedfe2,#f8f7f5 54%,#c9cbce); --button: #5d5d60; --button-text: #fff; }
+    .warm { --surface: #f8f6f1c7; --edge: #fffdf8c7; --shadow: #705f4212; --shine: #fffdf4; --ink: #48443f; --muted: #827b72; --faint: #b2aaa0; --logo-bg: #fffdf9ba; --card: #fffdf8a1; --card-edge: #fffdf7d2; --cover: linear-gradient(135deg,#e4d5c3,#f5f1e9 54%,#c9d3c2); --button: #625e57; --button-text: #fff; }
+    .blue { --surface: #f1f6f7bb; --edge: #ffffffaf; --shadow: #43677515; --shine: #faffff; --ink: #3c474b; --muted: #718186; --faint: #9baeb3; --logo-bg: #faffffad; --card: #fbfefea0; --card-edge: #ffffffc5; --cover: linear-gradient(135deg,#c3dce3,#f3f5ed 54%,#bcd2cd); --button: #53646a; --button-text: #fff; }
+    @media (max-width: 720px) { main { padding: 36px 16px; } .grid { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <div class="backdrop"></div>
+  <main>
+    <div class="eyebrow">此刻 · COLOR STUDY</div>
+    <h1>把界面再放淡一点。</h1>
+    <p class="intro">四种低对比度毛玻璃方向：只保留必要层次，让内容和建议更安静。</p>
+    <section class="grid">
+      <article class="option"><div class="option-head"><span class="option-title">01 · 薄雾灰</span><span class="option-note">中性 / 推荐</span></div><div class="preview mist"><div class="content"><div class="header"><div class="logo"><svg viewBox="0 0 24 24" fill="none"><path d="M19.1 8.2A8.2 8.2 0 1 0 15.7 4.8" stroke-width="1.7" stroke-linecap="round"/><circle cx="17.7" cy="6.3" r="1.5" fill="currentColor" stroke="none"/></svg></div><div class="brand">此刻 <span>· 私人管家</span></div><div class="time">23:45</div></div><div class="kicker">少数派推荐</div><h2>本周看什么｜最近值得一看的 8 部作品</h2><div class="sub">留一篇好内容给此刻慢慢读。</div><div class="article"><div class="cover"></div><div><div class="article-title">从忙碌里抽离十分钟，读一点新的东西。</div><div class="article-source">少数派 · 今天</div><div class="button">↗　阅读原文</div></div></div><div class="footer"><i class="dot"></i>只给一个方向</div></div></div></article>
+      <article class="option"><div class="option-head"><span class="option-title">02 · 云层白</span><span class="option-note">最轻 / 清透</span></div><div class="preview cloud"><div class="content"><div class="header"><div class="logo"><svg viewBox="0 0 24 24" fill="none"><path d="M19.1 8.2A8.2 8.2 0 1 0 15.7 4.8" stroke-width="1.7" stroke-linecap="round"/><circle cx="17.7" cy="6.3" r="1.5" fill="currentColor" stroke="none"/></svg></div><div class="brand">此刻 <span>· 私人管家</span></div><div class="time">23:45</div></div><div class="kicker">少数派推荐</div><h2>本周看什么｜最近值得一看的 8 部作品</h2><div class="sub">留一篇好内容给此刻慢慢读。</div><div class="article"><div class="cover"></div><div><div class="article-title">从忙碌里抽离十分钟，读一点新的东西。</div><div class="article-source">少数派 · 今天</div><div class="button">↗　阅读原文</div></div></div><div class="footer"><i class="dot"></i>只给一个方向</div></div></div></article>
+      <article class="option"><div class="option-head"><span class="option-title">03 · 柔纸暖白</span><span class="option-note">温和 / 低饱和</span></div><div class="preview warm"><div class="content"><div class="header"><div class="logo"><svg viewBox="0 0 24 24" fill="none"><path d="M19.1 8.2A8.2 8.2 0 1 0 15.7 4.8" stroke-width="1.7" stroke-linecap="round"/><circle cx="17.7" cy="6.3" r="1.5" fill="currentColor" stroke="none"/></svg></div><div class="brand">此刻 <span>· 私人管家</span></div><div class="time">23:45</div></div><div class="kicker">少数派推荐</div><h2>本周看什么｜最近值得一看的 8 部作品</h2><div class="sub">留一篇好内容给此刻慢慢读。</div><div class="article"><div class="cover"></div><div><div class="article-title">从忙碌里抽离十分钟，读一点新的东西。</div><div class="article-source">少数派 · 今天</div><div class="button">↗　阅读原文</div></div></div><div class="footer"><i class="dot"></i>只给一个方向</div></div></div></article>
+      <article class="option"><div class="option-head"><span class="option-title">04 · 清晨蓝灰</span><span class="option-note">冷静 / 通透</span></div><div class="preview blue"><div class="content"><div class="header"><div class="logo"><svg viewBox="0 0 24 24" fill="none"><path d="M19.1 8.2A8.2 8.2 0 1 0 15.7 4.8" stroke-width="1.7" stroke-linecap="round"/><circle cx="17.7" cy="6.3" r="1.5" fill="currentColor" stroke="none"/></svg></div><div class="brand">此刻 <span>· 私人管家</span></div><div class="time">23:45</div></div><div class="kicker">少数派推荐</div><h2>本周看什么｜最近值得一看的 8 部作品</h2><div class="sub">留一篇好内容给此刻慢慢读。</div><div class="article"><div class="cover"></div><div><div class="article-title">从忙碌里抽离十分钟，读一点新的东西。</div><div class="article-source">少数派 · 今天</div><div class="button">↗　阅读原文</div></div></div><div class="footer"><i class="dot"></i>只给一个方向</div></div></div></article>
+    </section>
+  </main>
+</body>
+</html>

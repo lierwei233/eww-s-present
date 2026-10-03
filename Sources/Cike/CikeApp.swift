@@ -32,6 +32,16 @@ enum MealPeriod: String, Sendable, Hashable {
     case lunch, dinner, night
 }
 
+private enum CikePalette {
+    static let glassTint = Color(red: 0.980, green: 0.976, blue: 0.965).opacity(0.52)
+    static let logoSurface = Color(red: 0.941, green: 0.933, blue: 0.918).opacity(0.72)
+    static let cardSurface = Color(red: 1.0, green: 0.992, blue: 0.973).opacity(0.48)
+    static let smallCardSurface = Color(red: 1.0, green: 0.992, blue: 0.973).opacity(0.33)
+    static let secondaryActionSurface = Color(red: 0.984, green: 0.976, blue: 0.957).opacity(0.60)
+    static let primaryText = Color.primary.opacity(0.78)
+    static let primaryAction = Color(red: 0.227, green: 0.227, blue: 0.235).opacity(0.84)
+}
+
 private enum MenuBarLogo {
     @MainActor
     static var image: NSImage? {
@@ -84,7 +94,7 @@ private struct OpenFocusLogo: View {
 }
 
 private enum AdviceScene {
-    case lunch, dinner, night, reply, content, chatPermission, chatUnavailable
+    case lunch, dinner, night, reply, content, travel, chatPermission, chatUnavailable
 
     static func meal(at date: Date, calendar: Calendar = .current) -> AdviceScene? {
         let parts = calendar.dateComponents([.hour, .minute], from: date)
@@ -329,13 +339,14 @@ private struct RecommendationPopover: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            header.padding(.bottom, 16)
+            header.padding(.bottom, 26)
             switch scene {
             case .reply: ReplyAdvice(suggestion: contextMonitor.replySuggestion)
             case .content: ContentAdvice(article: sspaiTopOne.article, contentStore: sspaiTopOne)
             case .lunch: FoodAdvice(meal: .lunch, mealRecommendations: mealRecommendations)
             case .dinner: FoodAdvice(meal: .dinner, mealRecommendations: mealRecommendations)
             case .night: FoodAdvice(meal: .night, mealRecommendations: mealRecommendations)
+            case .travel: TravelAdvice()
             case .chatPermission: ChatPermissionAdvice(dwell: contextMonitor.chatDwellSeconds, diagnostic: contextMonitor.chatDiagnostic, onEnable: contextMonitor.requestAccessibilityPermission)
             case .chatUnavailable: ChatUnavailableAdvice(diagnostic: contextMonitor.chatDiagnostic)
             }
@@ -346,6 +357,10 @@ private struct RecommendationPopover: View {
         .background {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .fill(.ultraThinMaterial)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .fill(CikePalette.glassTint)
+                }
         }
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         .background(PopoverWindowCornerRadius(
@@ -364,18 +379,28 @@ private struct RecommendationPopover: View {
     private var header: some View {
         HStack(spacing: 9) {
             ZStack {
-                RoundedRectangle(cornerRadius: 9).fill(.white.opacity(0.66))
+                RoundedRectangle(cornerRadius: 9).fill(CikePalette.logoSurface)
                 OpenFocusLogo(lineWidth: 1.45, color: .primary.opacity(0.72)).padding(6)
             }
             .frame(width: 29, height: 29)
             HStack(spacing: 4) {
-                Text("此刻").font(.system(size: 14, weight: .semibold))
-                Text("· 私人管家").font(.system(size: 12)).foregroundStyle(.secondary)
+                Text("此刻").font(.system(size: 14, weight: .semibold)).foregroundStyle(CikePalette.primaryText)
+                Text("· \(subtitle)").font(.system(size: 12)).foregroundStyle(.secondary)
             }
             Spacer()
             Text(Date.now, format: .dateTime.hour().minute())
                 .font(.system(size: 10, weight: .medium, design: .rounded))
                 .foregroundStyle(.tertiary)
+        }
+    }
+
+    private var subtitle: String {
+        switch scene {
+        case .content: "留一篇好内容慢慢读"
+        case .lunch, .dinner, .night: "留一顿好饭慢慢吃"
+        case .travel: "留一段好旅程慢慢走"
+        case .reply: "留一句合适的话慢慢回"
+        case .chatPermission, .chatUnavailable: "先听听你心里的话"
         }
     }
 
@@ -404,7 +429,8 @@ private struct ReplyAdvice: View {
         VStack(alignment: .leading, spacing: 10) {
             eyebrow("根据微信当前可见对话")
             Text(suggestion ?? "先回：「我看到了，给我一点时间想想，晚些回复你。」")
-                .font(.system(size: 20, weight: .semibold))
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(CikePalette.primaryText)
                 .fixedSize(horizontal: false, vertical: true)
                 .lineSpacing(3)
             Text("建议在本机根据当前可见文字生成，不会自动发送。")
@@ -422,30 +448,12 @@ private struct ContentAdvice: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            eyebrow(article?.source ?? "此刻发现")
-            if let coverURL = article?.coverURL {
-                AsyncImage(url: coverURL) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image
-                            .resizable()
-                            .scaledToFill()
-                    case .empty:
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .fill(.white.opacity(0.28))
-                    default:
-                        EmptyView()
-                    }
-                }
-                .frame(maxWidth: .infinity)
-                .frame(height: 132)
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            }
             Text(article?.title ?? "正在为你找一篇值得读的内容。")
-                .font(.system(size: 20, weight: .semibold))
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(CikePalette.primaryText)
                 .fixedSize(horizontal: false, vertical: true)
                 .lineSpacing(3)
-            Text(article.map { "一条来自 \($0.source) 的当下推荐。" } ?? "内容加载后会附上原文链接。")
+            Text(article?.metadataText.isEmpty == false ? article!.metadataText : "内容加载后会附上原文链接。")
                 .font(.system(size: 12)).foregroundStyle(.secondary)
             if let article {
                 Link(destination: article.url) {
@@ -467,7 +475,8 @@ private struct ChatPermissionAdvice: View {
         VStack(alignment: .leading, spacing: 10) {
             eyebrow("微信对话停留 \(dwell) 秒")
             Text("需要一点上下文，才能帮你想回复。")
-                .font(.system(size: 19, weight: .semibold))
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(CikePalette.primaryText)
             Text("允许「此刻」读取微信当前窗口的可见文字。内容只在本机临时处理，不会保存、上传或自动发送。")
                 .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             Button(action: onEnable) {
@@ -486,7 +495,8 @@ private struct ChatUnavailableAdvice: View {
         VStack(alignment: .leading, spacing: 10) {
             eyebrow("微信对话")
             Text("我还没读到当前对话内容。")
-                .font(.system(size: 19, weight: .semibold))
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(CikePalette.primaryText)
             Text(diagnostic.isEmpty ? "请保持目标聊天窗口在前台，并确认「此刻」拥有辅助功能权限。内容只在本机处理；建议生成后仍由你决定是否使用。" : diagnostic)
                 .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
@@ -641,16 +651,18 @@ private struct FoodAdvice: View {
         VStack(alignment: .leading, spacing: 11) {
             eyebrow(meal == .lunch ? "午餐时间 · 给你一个选择" : meal == .dinner ? "晚餐时间 · 给你一个选择" : "夜宵时间 · 给你一个选择")
             Text(title)
-                .font(.system(size: 21, weight: .semibold))
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(CikePalette.primaryText)
             Text(timeHint)
                 .font(.system(size: 12)).foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 8) {
                 Text(topOne?.itemName ?? order)
                     .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(CikePalette.primaryText)
                 Text(topOne?.description ?? description)
                     .font(.system(size: 10)).foregroundStyle(.secondary)
                 HStack(alignment: .firstTextBaseline) {
-                    Text(topOne?.priceText ?? price).font(.system(size: 19, weight: .semibold))
+                    Text(topOne?.priceText ?? price).font(.system(size: 19, weight: .semibold)).foregroundStyle(CikePalette.primaryText)
                     Spacer()
                     Text(topOne?.deliveryText ?? "预计送达 25–35 分钟").font(.system(size: 10)).foregroundStyle(.secondary)
                 }
@@ -666,7 +678,7 @@ private struct FoodAdvice: View {
                 }
             }
             .padding(13)
-            .background(.white.opacity(0.38), in: RoundedRectangle(cornerRadius: 14))
+            .background(CikePalette.cardSurface, in: RoundedRectangle(cornerRadius: 14))
             Text(topOne?.statusText ?? "示例推荐；商家、价格和距离需接入定位及平台后实时提供。")
                 .font(.system(size: 9)).foregroundStyle(.tertiary)
         }
@@ -687,7 +699,8 @@ private struct TravelAdvice: View {
         VStack(alignment: .leading, spacing: 10) {
             eyebrow("国庆假期将近 · 出游灵感")
             Text("去杭州，慢慢逛两天。")
-                .font(.system(size: 21, weight: .semibold))
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(CikePalette.primaryText)
             Text("按轻松、不赶路的方向，先替你排好一份计划。")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
 
@@ -705,7 +718,7 @@ private struct TravelAdvice: View {
                 ForEach(Array(sights.enumerated()), id: \.offset) { index, sight in
                     HStack(spacing: 8) {
                         Text("\(index + 1)").font(.system(size: 9, weight: .semibold)).foregroundStyle(.secondary)
-                            .frame(width: 21, height: 21).background(.white.opacity(0.45), in: RoundedRectangle(cornerRadius: 6))
+                            .frame(width: 21, height: 21).background(CikePalette.secondaryActionSurface, in: RoundedRectangle(cornerRadius: 6))
                         VStack(alignment: .leading, spacing: 2) {
                             Text(sight.0).font(.system(size: 10, weight: .medium))
                             Text(sight.1).font(.system(size: 8)).foregroundStyle(.secondary)
@@ -714,7 +727,7 @@ private struct TravelAdvice: View {
                         Text(sight.2).font(.system(size: 9, weight: .medium)).foregroundStyle(.secondary)
                     }
                     .padding(7)
-                    .background(.white.opacity(0.28), in: RoundedRectangle(cornerRadius: 9))
+                    .background(CikePalette.smallCardSurface, in: RoundedRectangle(cornerRadius: 9))
                 }
             }
             VStack(alignment: .leading, spacing: 5) {
@@ -739,7 +752,7 @@ private struct TravelAdvice: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(9)
-        .background(.white.opacity(0.34), in: RoundedRectangle(cornerRadius: 11))
+        .background(CikePalette.cardSurface, in: RoundedRectangle(cornerRadius: 11))
     }
 }
 
@@ -757,8 +770,8 @@ private struct GlassActionStyle: ButtonStyle {
             .font(.system(size: 10, weight: .medium))
             .padding(.vertical, 8)
             .padding(.horizontal, 8)
-            .foregroundStyle(isPrimary ? Color.white : Color.primary.opacity(0.78))
-            .background(isPrimary ? Color.primary.opacity(0.78) : Color.white.opacity(0.45), in: RoundedRectangle(cornerRadius: 9))
+            .foregroundStyle(isPrimary ? Color.white.opacity(0.98) : Color.primary.opacity(0.76))
+            .background(isPrimary ? CikePalette.primaryAction : CikePalette.secondaryActionSurface, in: RoundedRectangle(cornerRadius: 9))
             .opacity(configuration.isPressed ? 0.75 : 1)
     }
 }
