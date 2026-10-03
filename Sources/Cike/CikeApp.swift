@@ -165,15 +165,13 @@ private final class ContextMonitor: ObservableObject {
         lastContextReadAt = now
         guard let snapshot = WeChatAccessibilityReader.focusedConversation(bundleID: weChatBundleID) else {
             replySuggestion = nil
-            chatDiagnostic = "系统已授权，但微信没有提供当前焦点窗口。请回到微信对话，再点一下回复输入框。"
-            setScene(.chatUnavailable)
-            return true
+            chatDiagnostic = ""
+            return false
         }
         guard snapshot.isReplyComposer else {
             replySuggestion = nil
-            chatDiagnostic = "系统识别到焦点「\(snapshot.role.isEmpty ? "未知控件" : snapshot.role)」。请在微信回复框内点一下，让光标保持在输入框。"
-            setScene(.chatUnavailable)
-            return true
+            chatDiagnostic = ""
+            return false
         }
         guard !snapshot.visibleText.isEmpty else {
             chatDiagnostic = "已识别到回复框，但微信没有提供可读取的可见对话文字。"
@@ -205,10 +203,12 @@ private final class ContextMonitor: ObservableObject {
         UserDefaults.standard.set(count + 1, forKey: key)
     }
 
-    func beginPresentation() {
+    @discardableResult
+    func beginPresentation() -> AdviceScene {
         let selectedScene = scene
         presentedScene = selectedScene
         recordPresentation(of: selectedScene)
+        return selectedScene
     }
 
     func endPresentation() {
@@ -350,9 +350,15 @@ private struct RecommendationPopover: View {
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         .background(PopoverWindowCornerRadius(
             radius: 18,
-            onPresentation: contextMonitor.beginPresentation,
+            onPresentation: beginPresentation,
             onDismissal: contextMonitor.endPresentation
         ))
+    }
+
+    private func beginPresentation() {
+        if contextMonitor.beginPresentation() == .content {
+            Task { await sspaiTopOne.loadNext() }
+        }
     }
 
     private var header: some View {
@@ -417,6 +423,24 @@ private struct ContentAdvice: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             eyebrow(article?.source ?? "此刻发现")
+            if let coverURL = article?.coverURL {
+                AsyncImage(url: coverURL) { phase in
+                    switch phase {
+                    case .success(let image):
+                        image
+                            .resizable()
+                            .scaledToFill()
+                    case .empty:
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(.white.opacity(0.28))
+                    default:
+                        EmptyView()
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                .frame(height: 132)
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
             Text(article?.title ?? "正在为你找一篇值得读的内容。")
                 .font(.system(size: 20, weight: .semibold))
                 .fixedSize(horizontal: false, vertical: true)
@@ -430,9 +454,6 @@ private struct ContentAdvice: View {
                 }
                 .buttonStyle(GlassActionStyle(isPrimary: true))
             }
-        }
-        .task {
-            await contentStore.loadRandom()
         }
     }
 }

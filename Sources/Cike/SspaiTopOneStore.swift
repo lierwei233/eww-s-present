@@ -6,12 +6,13 @@ import Foundation
 @MainActor
 final class SspaiTopOneStore: ObservableObject {
     @Published private(set) var article: SspaiArticle?
-    private var didLoad = false
+    private var isLoading = false
+    private let seenURLsKey = "Cike.shownContentURLs"
 
-    func loadRandom() async {
-        guard !didLoad else { return }
-        didLoad = true
-
+    func loadNext() async {
+        guard !isLoading else { return }
+        isLoading = true
+        defer { isLoading = false }
         await loadSspai()
     }
 
@@ -25,7 +26,18 @@ final class SspaiTopOneStore: ObservableObject {
             let (data, response) = try await URLSession.shared.data(for: request)
             guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode),
                   let html = String(data: data, encoding: .utf8) else { return }
-            article = SspaiArticle.parse(from: html)
+            let candidates = SspaiArticle.parseAll(from: html)
+            guard !candidates.isEmpty else { return }
+
+            var seenURLs = UserDefaults.standard.stringArray(forKey: seenURLsKey) ?? []
+            let seen = Set(seenURLs)
+            let next = candidates.first(where: { !seen.contains($0.url.absoluteString) }) ?? candidates[0]
+            if seen.contains(next.url.absoluteString) {
+                seenURLs.removeAll()
+            }
+            seenURLs.append(next.url.absoluteString)
+            UserDefaults.standard.set(Array(seenURLs.suffix(50)), forKey: seenURLsKey)
+            article = next
         } catch {
             // The recommendation view keeps its original local suggestion on a network failure.
         }
@@ -37,18 +49,33 @@ struct SspaiArticle {
     let title: String
     let url: URL
     let source: String
+    let coverURL: URL?
 
-    static func parse(from html: String) -> SspaiArticle? {
-        let anchorPattern = #"<a\b(?=[^>]*\bclass=[\"'][^\"']*article__card__link[^\"']*[\"'])(?=[^>]*\bhref=[\"']([^\"']+)[\"'])[^>]*>([\s\S]*?)</a>"#
-        guard let anchor = firstMatch(anchorPattern, in: html), anchor.count == 3 else { return nil }
-        let href = anchor[1]
-        let body = anchor[2]
+    static func parseAll(from html: String) -> [SspaiArticle] {
+        let cardPattern = #"<article\b(?=[^>]*\bclass=[\"'][^\"']*article__card[^\"']*[\"'])[^>]*>([\s\S]*?)</article>"#
+        return allMatches(cardPattern, in: html).compactMap { card in
+            guard card.count == 2 else { return nil }
+            return parseCard(card[1])
+        }
+    }
+
+    private static func parseCard(_ body: String) -> SspaiArticle? {
+        let hrefPattern = #"<a\b(?=[^>]*\bclass=[\"'][^\"']*article__card__link[^\"']*[\"'])(?=[^>]*\bhref=[\"']([^\"']+)[\"'])[^>]*>"#
+        guard let hrefMatch = firstMatch(hrefPattern, in: body), hrefMatch.count == 2 else { return nil }
+        let href = hrefMatch[1]
         let titlePattern = #"<p\b[^>]*\bclass=[\"'][^\"']*article__card__title[^\"']*[\"'][^>]*>([\s\S]*?)</p>"#
         guard let titleMatch = firstMatch(titlePattern, in: body), titleMatch.count == 2 else { return nil }
 
         let title = htmlText(titleMatch[1])
         guard !title.isEmpty, let url = URL(string: href, relativeTo: URL(string: "https://sspai.com"))?.absoluteURL else { return nil }
-        return SspaiArticle(title: title, url: url, source: "少数派")
+        let coverPattern = #"<div\b(?=[^>]*\bclass=[\"'][^\"']*article__card__cover[^\"']*[\"'])[^>]*>[\s\S]*?<img\b[^>]*(?:\bdata-src|\bsrc)=[\"']([^\"']+)[\"']"#
+        let coverURL: URL?
+        if let match = firstMatch(coverPattern, in: body), match.count > 1 {
+            coverURL = URL(string: match[1])
+        } else {
+            coverURL = nil
+        }
+        return SspaiArticle(title: title, url: url, source: "少数派", coverURL: coverURL)
     }
 
     private static func firstMatch(_ pattern: String, in text: String) -> [String]? {
@@ -58,6 +85,17 @@ struct SspaiArticle {
         return (0..<match.numberOfRanges).compactMap { index in
             guard let range = Range(match.range(at: index), in: text) else { return nil }
             return String(text[range])
+        }
+    }
+
+    private static func allMatches(_ pattern: String, in text: String) -> [[String]] {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return [] }
+        let range = NSRange(text.startIndex..., in: text)
+        return regex.matches(in: text, range: range).map { match in
+            (0..<match.numberOfRanges).compactMap { index in
+                guard let range = Range(match.range(at: index), in: text) else { return nil }
+                return String(text[range])
+            }
         }
     }
 

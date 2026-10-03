@@ -40,4 +40,4 @@ defaults write com.cike.menubar MeituanRecommendationEndpoint -string "https://�
 
 ## 少数派首页推荐
 
-内容推荐会读取 [少数派首页](https://sspai.com/) 推荐列表的第一篇公开文章，并展示标题与原文链接。该功能不读取浏览器 Cookie、登录状态或账号资料。
+内容推荐会从 [少数派首页](https://sspai.com/) 的公开推荐列表中选择一篇未展示文章，并展示首图、标题与原文链接。最近展示过的 50 条链接会保存在本机，用于避免重复；该功能不读取浏览器 Cookie、登录状态或账号资料。
