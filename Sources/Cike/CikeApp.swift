@@ -500,6 +500,7 @@ private struct ContentAdvice: View {
                 .buttonStyle(GlassActionStyle(isPrimary: true))
             }
         }
+        .frame(minHeight: 96, alignment: .top)
     }
 }
 

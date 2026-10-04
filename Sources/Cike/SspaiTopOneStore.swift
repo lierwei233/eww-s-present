@@ -13,7 +13,15 @@ final class SspaiTopOneStore: ObservableObject {
     private let seenURLsKey = "Cike.shownContentURLs"
     private let sourceCursorKey = "Cike.contentSourceCursor"
     private let sourceRotationVersionKey = "Cike.contentSourceRotationVersion"
+    private let cacheTTL: TimeInterval = 20 * 60
+    private let retryInterval: TimeInterval = 90
     private var isLoading = false
+    private var cachedFeeds: [ContentSource: CachedFeed] = [:]
+    private var lastAttemptAt: [ContentSource: Date] = [:]
+
+    init() {
+        Task { await warmContentPool() }
+    }
 
     func loadNext() async -> ContentLoadResult {
         guard !isLoading else { return .unavailable }
@@ -34,7 +42,7 @@ final class SspaiTopOneStore: ObservableObject {
         var foundContent = false
         let seen = Set(UserDefaults.standard.stringArray(forKey: seenURLsKey) ?? [])
         for source in ordered {
-            let articles = await source.loadArticles()
+            let articles = await articles(for: source)
             guard !articles.isEmpty else { continue }
             foundContent = true
             if let article = articles.first(where: { !seen.contains($0.url.absoluteString) }) {
@@ -48,31 +56,62 @@ final class SspaiTopOneStore: ObservableObject {
         seenURLs.append(next.url.absoluteString)
         UserDefaults.standard.set(Array(seenURLs.suffix(80)), forKey: seenURLsKey)
         UserDefaults.standard.set((source.index + 1) % sources.count, forKey: sourceCursorKey)
-        var displayArticle = next
-        if source.needsChineseTitle, let translatedTitle = await ContentSource.translateTitle(next.title) {
-            displayArticle = next.with(title: translatedTitle)
+        article = next
+        Task { [weak self] in
+            await self?.enrich(next, from: source)
         }
-        article = displayArticle
-
-        if source == .sspai {
-            let details = await articleDetails(at: next.url)
-            guard article?.url == next.url else { return .loaded }
-            article = displayArticle.with(details: details)
+        Task { [weak self] in
+            await self?.warmContentPool()
         }
         return .loaded
     }
 
-    private func articleDetails(at url: URL) async -> SspaiArticle.Details {
-        guard let html = await ContentSource.loadHTML(from: url) else { return .empty }
-        return SspaiArticle.Details.parse(from: html)
+    private func articles(for source: ContentSource) async -> [SspaiArticle] {
+        let now = Date.now
+        if let cached = cachedFeeds[source], now.timeIntervalSince(cached.refreshedAt) < cacheTTL {
+            return cached.articles
+        }
+        if let attempt = lastAttemptAt[source], now.timeIntervalSince(attempt) < retryInterval {
+            return cachedFeeds[source]?.articles ?? []
+        }
+        lastAttemptAt[source] = now
+        let fetched = await source.loadArticles()
+        if !fetched.isEmpty {
+            cachedFeeds[source] = CachedFeed(articles: fetched, refreshedAt: now)
+            return fetched
+        }
+        return cachedFeeds[source]?.articles ?? []
+    }
+
+    private func warmContentPool() async {
+        for source in ContentSource.allCases {
+            _ = await articles(for: source)
+        }
+    }
+
+    private func enrich(_ article: SspaiArticle, from source: ContentSource) async {
+        var enriched = article
+        if source.needsChineseTitle, let translatedTitle = await ContentSource.translateTitle(article.title) {
+            enriched = enriched.with(title: translatedTitle)
+        }
+        if source == .sspai, let html = await ContentSource.loadHTML(from: article.url) {
+            enriched = enriched.with(details: SspaiArticle.Details.parse(from: html))
+        }
+        guard self.article?.url == article.url else { return }
+        self.article = enriched
+    }
+
+    private struct CachedFeed {
+        let articles: [SspaiArticle]
+        let refreshedAt: Date
     }
 }
 
 private enum ContentSource: CaseIterable {
-    case sspai, quanta, guokr, gcores, atlasObscura, mcSweeneys
+    case sspai, quanta, guokr, gcores, atlasObscura
 
     var index: Int { Self.allCases.firstIndex(of: self) ?? 0 }
-    var needsChineseTitle: Bool { self == .quanta || self == .atlasObscura || self == .mcSweeneys }
+    var needsChineseTitle: Bool { self == .quanta || self == .atlasObscura }
 
     func loadArticles() async -> [SspaiArticle] {
         switch self {
@@ -89,8 +128,6 @@ private enum ContentSource: CaseIterable {
             return Self.parseLinkedHeadings(html, source: "机核", host: "https://www.gcores.com", requiredPath: "/articles/")
         case .atlasObscura:
             return await Self.loadRSS(url: "https://www.atlasobscura.com/feeds/latest", source: "Atlas Obscura")
-        case .mcSweeneys:
-            return await Self.loadRSS(url: "https://feeds.feedburner.com/mcsweeneys", source: "McSweeney’s")
         }
     }
 
