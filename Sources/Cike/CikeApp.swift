@@ -485,6 +485,22 @@ private struct ContentAdvice: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
+            if let coverURL = article?.coverURL {
+                AsyncImage(url: coverURL, transaction: Transaction(animation: .easeInOut(duration: 0.18))) { phase in
+                    switch phase {
+                    case .success(let image):
+                        image
+                            .resizable()
+                            .scaledToFill()
+                    default:
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(CikePalette.smallCardSurface)
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                .frame(height: 118)
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
             Text(article?.title ?? "正在为你找一篇值得读的内容。")
                 .font(.system(size: 18, weight: .semibold))
                 .foregroundStyle(CikePalette.primaryText)

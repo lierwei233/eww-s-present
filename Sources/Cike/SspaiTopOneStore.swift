@@ -94,8 +94,13 @@ final class SspaiTopOneStore: ObservableObject {
         if source.needsChineseTitle, let translatedTitle = await ContentSource.translateTitle(article.title) {
             enriched = enriched.with(title: translatedTitle)
         }
-        if source == .sspai, let html = await ContentSource.loadHTML(from: article.url) {
-            enriched = enriched.with(details: SspaiArticle.Details.parse(from: html))
+        if source == .sspai || enriched.coverURL == nil, let html = await ContentSource.loadHTML(from: article.url) {
+            if source == .sspai {
+                enriched = enriched.with(details: SspaiArticle.Details.parse(from: html))
+            }
+            if enriched.coverURL == nil {
+                enriched = enriched.with(coverURL: ContentSource.coverURL(in: html, relativeTo: article.url))
+            }
         }
         guard self.article?.url == article.url else { return }
         self.article = enriched
@@ -149,7 +154,7 @@ private enum ContentSource: CaseIterable {
         guard let url = URL(string: url), let xml = await loadHTML(from: url) else { return [] }
         return RSSParser.parse(xml).compactMap { item in
             guard let title = item.title, let link = item.link, let articleURL = URL(string: link), !title.isEmpty else { return nil }
-            return SspaiArticle(title: title, url: articleURL, source: source, coverURL: item.imageURL, date: item.date)
+            return SspaiArticle(title: title, url: articleURL, source: source, coverURL: item.imageURL ?? coverURL(in: item.description ?? "", relativeTo: articleURL), date: item.date)
         }
     }
 
@@ -163,10 +168,26 @@ private enum ContentSource: CaseIterable {
                   url.path.contains(requiredPath) else { continue }
             let title = SspaiArticle.htmlText(match[2])
             guard title.count >= 6, title.count <= 180, used.insert(url.absoluteString).inserted else { continue }
-            output.append(SspaiArticle(title: title, url: url, source: source, coverURL: nil))
+            output.append(SspaiArticle(title: title, url: url, source: source, coverURL: coverURL(in: match[2], relativeTo: url)))
             if output.count == 8 { break }
         }
         return output
+    }
+
+    static func coverURL(in html: String, relativeTo baseURL: URL) -> URL? {
+        let patterns = [
+            #"<meta\b[^>]*(?:property|name)=[\"'](?:og:image|twitter:image)[\"'][^>]*content=[\"']([^\"']+)[\"']"#,
+            #"<meta\b[^>]*content=[\"']([^\"']+)[\"'][^>]*(?:property|name)=[\"'](?:og:image|twitter:image)[\"']"#,
+            #"<img\b[^>]*(?:data-src|src)=[\"']([^\"']+)[\"']"#
+        ]
+        for pattern in patterns {
+            guard let match = SspaiArticle.firstMatch(pattern, in: html), match.count > 1 else { continue }
+            let raw = match[1].replacingOccurrences(of: "&amp;", with: "&")
+            if let url = URL(string: raw, relativeTo: baseURL)?.absoluteURL, url.scheme == "https" {
+                return url
+            }
+        }
+        return nil
     }
 
     static func parseLinkedHeadings(_ html: String, source: String, host: String, requiredPath: String) -> [SspaiArticle] {
@@ -243,6 +264,10 @@ struct SspaiArticle {
         SspaiArticle(title: title, url: url, source: source, coverURL: coverURL, date: date, author: author, readingTime: readingTime)
     }
 
+    func with(coverURL: URL?) -> SspaiArticle {
+        SspaiArticle(title: title, url: url, source: source, coverURL: coverURL, date: date, author: author, readingTime: readingTime)
+    }
+
     static func parseAll(from html: String) -> [SspaiArticle] {
         let cardPattern = #"<article\b(?=[^>]*\bclass=[\"'][^\"']*article__card[^\"']*[\"'])[^>]*>([\s\S]*?)</article>"#
         return allMatches(cardPattern, in: html).compactMap { card in
@@ -258,7 +283,11 @@ struct SspaiArticle {
         guard let titleMatch = firstMatch(titlePattern, in: body), titleMatch.count == 2 else { return nil }
         let title = htmlText(titleMatch[1])
         guard !title.isEmpty, let url = URL(string: hrefMatch[1], relativeTo: URL(string: "https://sspai.com"))?.absoluteURL else { return nil }
-        return SspaiArticle(title: title, url: url, source: "少数派", coverURL: nil)
+        let coverPattern = #"<div\b(?=[^>]*\bclass=[\"'][^\"']*article__card__cover[^\"']*[\"'])[^>]*>[\s\S]*?<img\b[^>]*(?:data-src|src)=[\"']([^\"']+)[\"']"#
+        let cover = firstMatch(coverPattern, in: body).flatMap { match in
+            match.count > 1 ? URL(string: match[1], relativeTo: URL(string: "https://sspai.com"))?.absoluteURL : nil
+        }
+        return SspaiArticle(title: title, url: url, source: "少数派", coverURL: cover)
     }
 
     static func firstMatch(_ pattern: String, in text: String) -> [String]? {
@@ -315,7 +344,7 @@ struct SspaiArticle {
 }
 
 private final class RSSParser: NSObject, XMLParserDelegate {
-    struct Item { var title: String?; var link: String?; var date: String?; var imageURL: URL? }
+    struct Item { var title: String?; var link: String?; var date: String?; var imageURL: URL?; var description: String? }
     private var items: [Item] = []
     private var item: Item?
     private var element = ""
@@ -333,7 +362,7 @@ private final class RSSParser: NSObject, XMLParserDelegate {
         element = elementName.lowercased()
         text = ""
         if element == "item" || element == "entry" { item = Item() }
-        if (element == "media:content" || element == "enclosure"), let value = attributeDict["url"], item?.imageURL == nil {
+        if (element == "media:content" || element == "media:thumbnail" || element == "enclosure"), let value = attributeDict["url"], item?.imageURL == nil {
             item?.imageURL = URL(string: value)
         }
     }
@@ -348,6 +377,7 @@ private final class RSSParser: NSObject, XMLParserDelegate {
         case "link": if current.link == nil { current.link = value }
         case "guid": if current.link == nil { current.link = value }
         case "pubdate", "published", "updated": if current.date == nil { current.date = value }
+        case "description", "content:encoded": if current.description == nil { current.description = value }
         case "item", "entry":
             if current.title != nil, current.link != nil { items.append(current) }
             item = nil
