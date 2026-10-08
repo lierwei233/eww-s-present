@@ -9,6 +9,7 @@ final class AICoverGeneration: ObservableObject {
     @Published var hasAPIKey: Bool
     @Published var pendingAPIKey = ""
     @Published private(set) var didSaveAPIKey = false
+    @Published private(set) var keychainError: String?
     @Published var isShowingSetup = false
 
     private let service = "com.cike.menubar.dashscope"
@@ -18,8 +19,10 @@ final class AICoverGeneration: ObservableObject {
     @Published private var failed = Set<String>()
 
     init() {
-        apiKey = Keychain.value(service: service, account: account)
-        hasAPIKey = apiKey != nil
+        let result = Keychain.value(service: service, account: account)
+        apiKey = result.value
+        hasAPIKey = result.value != nil
+        keychainError = Self.keychainError(for: result.status)
     }
 
     func imageURL(for article: SspaiArticle) -> URL? {
@@ -62,21 +65,46 @@ final class AICoverGeneration: ObservableObject {
         }
     }
 
+    @discardableResult
+    func retryAPIKeyAccess() -> Bool {
+        let result = Keychain.value(service: service, account: account)
+        apiKey = result.value
+        hasAPIKey = result.value != nil
+        keychainError = Self.keychainError(for: result.status)
+        return hasAPIKey
+    }
+
     func saveAPIKey(_ apiKey: String) {
         let trimmed = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        Keychain.save(trimmed, service: service, account: account)
+        let status = Keychain.save(trimmed, service: service, account: account)
+        guard status == errSecSuccess else {
+            keychainError = "无法保存到钥匙串（错误 \(status)）。请在系统提示中允许此刻访问后重试。"
+            return
+        }
         self.apiKey = trimmed
         hasAPIKey = true
         pendingAPIKey = ""
         didSaveAPIKey = true
+        keychainError = nil
+        isShowingSetup = false
     }
 
     func removeAPIKey() {
-        Keychain.remove(service: service, account: account)
+        let status = Keychain.remove(service: service, account: account)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            keychainError = "无法从钥匙串移除密钥（错误 \(status)）。"
+            return
+        }
         apiKey = nil
         hasAPIKey = false
         didSaveAPIKey = false
+        keychainError = nil
+    }
+
+    private static func keychainError(for status: OSStatus) -> String? {
+        if status == errSecSuccess || status == errSecItemNotFound { return nil }
+        return "钥匙串中已有密钥，但此刻暂时无法读取（错误 \(status)）。请允许钥匙串访问后重试。"
     }
 
     private var cacheDirectory: URL {
@@ -117,6 +145,9 @@ struct AICoverSettingsView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
+                if let error = generation.keychainError {
+                    Text(error).font(.system(size: 11)).foregroundStyle(.secondary)
+                }
             }
             Section("调用方式") {
                 Text("标题由 qwen3.8-flash 转成画面提示词，再交给 wan2.6-t2i 生成一张 16:9 图片。每次只生成 1 张，并缓存到本机。")
@@ -143,12 +174,17 @@ struct AICoverSetupAdvice: View {
                 .fixedSize(horizontal: false, vertical: true)
             SecureField(generation.hasAPIKey ? "输入新的 DashScope API Key 以替换" : "粘贴 DashScope API Key", text: $generation.pendingAPIKey)
                 .textFieldStyle(.roundedBorder)
+            if let error = generation.keychainError {
+                Text(error).font(.system(size: 11)).foregroundStyle(.secondary)
+            }
             HStack(spacing: 10) {
                 Button("保存并启用") {
                     generation.saveAPIKey(generation.pendingAPIKey)
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(generation.pendingAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                Button("返回") { generation.isShowingSetup = false }
+                    .buttonStyle(.plain)
                 if generation.hasAPIKey {
                     Text("已保存")
                         .font(.system(size: 11))
@@ -161,7 +197,7 @@ struct AICoverSetupAdvice: View {
 }
 
 private enum Keychain {
-    static func value(service: String, account: String) -> String? {
+    static func value(service: String, account: String) -> (value: String?, status: OSStatus) {
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: service,
@@ -170,29 +206,35 @@ private enum Keychain {
             kSecMatchLimit: kSecMatchLimitOne
         ]
         var result: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
-              let data = result as? Data else { return nil }
-        return String(data: data, encoding: .utf8)
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        guard status == errSecSuccess, let data = result as? Data else { return (nil, status) }
+        return (String(data: data, encoding: .utf8), status)
     }
 
-    static func save(_ value: String, service: String, account: String) {
-        remove(service: service, account: account)
+    static func save(_ value: String, service: String, account: String) -> OSStatus {
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: service,
             kSecAttrAccount: account,
             kSecValueData: Data(value.utf8)
         ]
-        SecItemAdd(query as CFDictionary, nil)
+        let status = SecItemAdd(query as CFDictionary, nil)
+        guard status == errSecDuplicateItem else { return status }
+        let match: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: service,
+            kSecAttrAccount: account
+        ]
+        return SecItemUpdate(match as CFDictionary, [kSecValueData: Data(value.utf8)] as CFDictionary)
     }
 
-    static func remove(service: String, account: String) {
+    static func remove(service: String, account: String) -> OSStatus {
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: service,
             kSecAttrAccount: account
         ]
-        SecItemDelete(query as CFDictionary)
+        return SecItemDelete(query as CFDictionary)
     }
 }
 

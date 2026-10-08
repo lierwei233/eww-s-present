@@ -10,6 +10,7 @@ enum ContentLoadResult: Equatable {
 @MainActor
 final class SspaiTopOneStore: ObservableObject {
     @Published private(set) var article: SspaiArticle?
+    @Published private(set) var isCheckingCover = false
     private let seenURLsKey = "Cike.shownContentURLs"
     private let sourceCursorKey = "Cike.contentSourceCursor"
     private let sourceRotationVersionKey = "Cike.contentSourceRotationVersion"
@@ -57,6 +58,7 @@ final class SspaiTopOneStore: ObservableObject {
         seenURLs.append(next.url.absoluteString)
         UserDefaults.standard.set(Array(seenURLs.suffix(80)), forKey: seenURLsKey)
         UserDefaults.standard.set((source.index + 1) % sources.count, forKey: sourceCursorKey)
+        isCheckingCover = true
         article = next
         Task { [weak self] in
             await self?.enrich(next, from: source)
@@ -96,19 +98,24 @@ final class SspaiTopOneStore: ObservableObject {
 
     private func enrich(_ article: SspaiArticle, from source: ContentSource) async {
         var enriched = article
-        if source.needsChineseTitle, let translatedTitle = await ContentSource.translateTitle(article.title) {
-            enriched = enriched.with(title: translatedTitle)
-        }
         if source == .sspai || enriched.coverURL == nil, let html = await ContentSource.loadHTML(from: article.url) {
             if source == .sspai {
                 enriched = enriched.with(details: SspaiArticle.Details.parse(from: html))
             }
             if enriched.coverURL == nil {
-                enriched = enriched.with(coverURL: ContentSource.coverURL(in: html, relativeTo: article.url))
+                let cover = source == .itsNiceThat
+                    ? ContentSource.itsNiceThatCoverURL(in: html)
+                    : ContentSource.coverURL(in: html, relativeTo: article.url)
+                enriched = enriched.with(coverURL: cover)
             }
         }
         guard self.article?.url == article.url else { return }
         self.article = enriched
+        isCheckingCover = false
+        if source.needsChineseTitle, let translatedTitle = await ContentSource.translateTitle(article.title) {
+            guard self.article?.url == article.url else { return }
+            self.article = enriched.with(title: translatedTitle)
+        }
     }
 
     private struct CachedFeed {
@@ -232,6 +239,12 @@ private enum ContentSource: CaseIterable {
             }
         }
         return nil
+    }
+
+    static func itsNiceThatCoverURL(in html: String) -> URL? {
+        let pattern = #"<img\b[^>]*\bsrc=["'](https://(?:m|admin)\.itsnicethat\.com/[^"']+)["']"#
+        guard let match = SspaiArticle.firstMatch(pattern, in: html), match.count > 1 else { return nil }
+        return URL(string: match[1].replacingOccurrences(of: "&amp;", with: "&"))
     }
 
     static func translateTitle(_ title: String) async -> String? {

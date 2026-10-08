@@ -150,6 +150,7 @@ private final class ContextMonitor: ObservableObject {
     private let breakReminderCountPrefix = "Cike.breakReminderCount"
     private let restBreakThreshold: TimeInterval = 5 * 60
     private var weChatBecameActiveAt: Date?
+    private var lastWeChatFrontmostAt: Date?
     private var lastContextReadAt: Date?
     private var timer: Timer?
     private var continuousUseStartedAt: Date?
@@ -167,19 +168,26 @@ private final class ContextMonitor: ObservableObject {
         _ = AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary)
     }
 
-    private func refresh(now: Date = .now) {
+    private func refresh(now: Date = .now, openingPopover: Bool = false) {
         refreshContinuousUse(now: now)
         if UserDefaults.standard.bool(forKey: travelPreviewKey) {
             setScene(.travel)
             return
         }
-        let isWeChatFrontmost = NSWorkspace.shared.frontmostApplication?.bundleIdentifier == weChatBundleID
-        if isWeChatFrontmost {
+        let frontmostID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        if frontmostID == weChatBundleID { lastWeChatFrontmostAt = now }
+        let openedFromWeChat = openingPopover &&
+            frontmostID == Bundle.main.bundleIdentifier &&
+            now.timeIntervalSince(lastWeChatFrontmostAt ?? .distantPast) < 2
+        let hasFocusedReply = (frontmostID == weChatBundleID || openedFromWeChat) &&
+            AXIsProcessTrusted() &&
+            WeChatAccessibilityReader.isReplyComposerFocused(bundleID: weChatBundleID)
+        if hasFocusedReply {
             if weChatBecameActiveAt == nil { weChatBecameActiveAt = now }
             let elapsed = Int(now.timeIntervalSince(weChatBecameActiveAt ?? now))
             chatDwellSeconds = elapsed
             if elapsed >= 7 {
-                if updateChatSuggestion(now: now) { return }
+                if updateChatSuggestion(now: now, forceRead: openingPopover) { return }
             }
         } else {
             weChatBecameActiveAt = nil
@@ -205,22 +213,19 @@ private final class ContextMonitor: ObservableObject {
     }
 
     @discardableResult
-    private func updateChatSuggestion(now: Date) -> Bool {
-        guard AXIsProcessTrusted() else {
-            chatDiagnostic = "macOS 尚未向当前签名版本开放辅助功能读取权限。请在系统设置中重新添加并开启此刻，然后回到这里。"
-            setScene(.chatPermission)
-            return true
-        }
-        if let lastContextReadAt, now.timeIntervalSince(lastContextReadAt) < 3 {
+    private func updateChatSuggestion(now: Date, forceRead: Bool = false) -> Bool {
+        if !forceRead, let lastContextReadAt, now.timeIntervalSince(lastContextReadAt) < 3 {
             return true
         }
         lastContextReadAt = now
         guard let snapshot = WeChatAccessibilityReader.focusedConversation(bundleID: weChatBundleID) else {
+            lastContextReadAt = nil
             replySuggestion = nil
             chatDiagnostic = ""
             return false
         }
         guard snapshot.isReplyComposer else {
+            lastContextReadAt = nil
             replySuggestion = nil
             chatDiagnostic = ""
             return false
@@ -263,6 +268,7 @@ private final class ContextMonitor: ObservableObject {
 
     @discardableResult
     func beginPresentation() -> AdviceScene {
+        refresh(openingPopover: true)
         let selectedScene = scene
         presentedScene = selectedScene
         recordPresentation(of: selectedScene)
@@ -366,6 +372,21 @@ private enum WeChatAccessibilityReader {
             if role == (kAXTextAreaRole as String) || role == "AXTextView" { return true }
             return role == (kAXTextFieldRole as String)
         }
+    }
+
+    static func isReplyComposerFocused(bundleID: String) -> Bool {
+        guard let runningApp = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first else { return false }
+        let appElement = AXUIElementCreateApplication(runningApp.processIdentifier)
+        guard let focused = copyAttribute(kAXFocusedUIElementAttribute as CFString, from: appElement),
+              CFGetTypeID(focused) == AXUIElementGetTypeID(),
+              let window = copyAttribute(kAXFocusedWindowAttribute as CFString, from: appElement),
+              CFGetTypeID(window) == AXUIElementGetTypeID() else { return false }
+        let element = unsafeDowncast(focused, to: AXUIElement.self)
+        let role = (copyAttribute(kAXRoleAttribute as CFString, from: element) as? String) ?? ""
+        let label = [kAXPlaceholderValueAttribute, kAXDescriptionAttribute, kAXTitleAttribute]
+            .compactMap { copyAttribute($0 as CFString, from: element) as? String }
+            .joined(separator: " ")
+        return FocusedConversation(role: role, label: label, visibleText: []).isReplyComposer
     }
 
     static func focusedConversation(bundleID: String) -> FocusedConversation? {
@@ -651,8 +672,10 @@ private struct ContentAdvice: View {
             }
         }
         .frame(minHeight: 96, alignment: .top)
-        .task(id: article?.url) {
-            if let article { aiCoverGeneration.generateIfNeeded(for: article) }
+        .task(id: "\(article?.url.absoluteString ?? "")|\(contentStore.isCheckingCover)|\(aiCoverGeneration.hasAPIKey)") {
+            if let article, !contentStore.isCheckingCover {
+                aiCoverGeneration.generateIfNeeded(for: article)
+            }
         }
     }
 
@@ -661,7 +684,11 @@ private struct ContentAdvice: View {
         ZStack {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(CikePalette.smallCardSurface)
-            if aiCoverGeneration.isGenerating(article) {
+            if contentStore.isCheckingCover {
+                Text("正在查找原文配图")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            } else if aiCoverGeneration.isGenerating(article) {
                 HStack(spacing: 7) {
                     ProgressView().controlSize(.small)
                     Text("正在生成这篇内容的封面")
@@ -669,9 +696,25 @@ private struct ContentAdvice: View {
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
             } else if !aiCoverGeneration.hasAPIKey {
-                Text("在设置中保存 API Key 后生成封面")
+                VStack(spacing: 8) {
+                    Text(aiCoverGeneration.keychainError ?? "设置 API Key 后可生成封面")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                    HStack(spacing: 12) {
+                        if aiCoverGeneration.keychainError != nil {
+                            Button("重试读取") {
+                                if aiCoverGeneration.retryAPIKeyAccess() {
+                                    aiCoverGeneration.generateIfNeeded(for: article, force: failedToLoadOriginal)
+                                }
+                            }
+                        }
+                        Button("设置密钥") { aiCoverGeneration.isShowingSetup = true }
+                    }
                     .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 16)
             } else if aiCoverGeneration.hasFailed(article) {
                 Text("这篇内容暂时未能生成封面")
                     .font(.system(size: 11))
