@@ -18,6 +18,7 @@ final class SspaiTopOneStore: ObservableObject {
     private var isLoading = false
     private var cachedFeeds: [ContentSource: CachedFeed] = [:]
     private var lastAttemptAt: [ContentSource: Date] = [:]
+    private var feedTasks: [ContentSource: Task<[SspaiArticle], Never>] = [:]
 
     init() {
         Task { await warmContentPool() }
@@ -30,10 +31,10 @@ final class SspaiTopOneStore: ObservableObject {
 
         let sources = ContentSource.allCases
         let start: Int
-        if UserDefaults.standard.integer(forKey: sourceRotationVersionKey) < 2 {
-            // Begin this expanded rotation with the newly added lighter sources.
-            start = ContentSource.guokr.index
-            UserDefaults.standard.set(2, forKey: sourceRotationVersionKey)
+        if UserDefaults.standard.integer(forKey: sourceRotationVersionKey) < 3 {
+            // Show one of the newly added sources first after upgrading the rotation.
+            start = ContentSource.nasa.index
+            UserDefaults.standard.set(3, forKey: sourceRotationVersionKey)
         } else {
             start = UserDefaults.standard.integer(forKey: sourceCursorKey) % sources.count
         }
@@ -71,11 +72,15 @@ final class SspaiTopOneStore: ObservableObject {
         if let cached = cachedFeeds[source], now.timeIntervalSince(cached.refreshedAt) < cacheTTL {
             return cached.articles
         }
+        if let task = feedTasks[source] { return await task.value }
         if let attempt = lastAttemptAt[source], now.timeIntervalSince(attempt) < retryInterval {
             return cachedFeeds[source]?.articles ?? []
         }
         lastAttemptAt[source] = now
-        let fetched = await source.loadArticles()
+        let task = Task { await source.loadArticles() }
+        feedTasks[source] = task
+        let fetched = await task.value
+        feedTasks[source] = nil
         if !fetched.isEmpty {
             cachedFeeds[source] = CachedFeed(articles: fetched, refreshedAt: now)
             return fetched
@@ -113,10 +118,10 @@ final class SspaiTopOneStore: ObservableObject {
 }
 
 private enum ContentSource: CaseIterable {
-    case sspai, quanta, guokr, gcores, atlasObscura
+    case sspai, quanta, guokr, nasa, smithsonian, publicDomainReview, itsNiceThat
 
     var index: Int { Self.allCases.firstIndex(of: self) ?? 0 }
-    var needsChineseTitle: Bool { self == .quanta || self == .atlasObscura }
+    var needsChineseTitle: Bool { self != .sspai && self != .guokr }
 
     func loadArticles() async -> [SspaiArticle] {
         switch self {
@@ -128,11 +133,47 @@ private enum ContentSource: CaseIterable {
         case .guokr:
             guard let html = await Self.loadHTML(from: URL(string: "https://www.guokr.com/")!) else { return [] }
             return Self.parseLinkedText(html, source: "果壳", host: "https://www.guokr.com", requiredPath: "/article/")
-        case .gcores:
-            guard let html = await Self.loadHTML(from: URL(string: "https://www.gcores.com/articles?page=1")!) else { return [] }
-            return Self.parseLinkedHeadings(html, source: "机核", host: "https://www.gcores.com", requiredPath: "/articles/")
-        case .atlasObscura:
-            return await Self.loadRSS(url: "https://www.atlasobscura.com/feeds/latest", source: "Atlas Obscura")
+        case .nasa:
+            return await Self.loadNASA()
+        case .smithsonian:
+            return await Self.loadRSS(url: "https://www.smithsonianmag.com/rss/science-nature/", source: "Smithsonian Magazine")
+        case .publicDomainReview:
+            return await Self.loadRSS(url: "https://publicdomainreview.org/rss.xml", source: "The Public Domain Review")
+        case .itsNiceThat:
+            return await Self.loadRSS(url: "https://www.itsnicethat.com/articles.atom", source: "It’s Nice That")
+        }
+    }
+
+    static func loadNASA() async -> [SspaiArticle] {
+        guard let url = URL(string: "https://science.nasa.gov/wp-json/wp/v2/apod-basic?api_key=DEMO_KEY") else { return [] }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 7
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode),
+                  let entries = try? JSONDecoder().decode([NASAEntry].self, from: data) else { return [] }
+            return entries.filter { $0.mediaType == "image" }.compactMap { entry in
+                guard let articleURL = URL(string: entry.permalink),
+                      articleURL.scheme == "https",
+                      let coverURL = entry.hdurl.flatMap(URL.init(string:)),
+                      coverURL.scheme == "https" else { return nil }
+                return SspaiArticle(title: entry.title, url: articleURL, source: "NASA 每日天文图片", coverURL: coverURL, date: entry.date)
+            }
+        } catch {
+            return []
+        }
+    }
+
+    private struct NASAEntry: Decodable {
+        let date: String
+        let title: String
+        let permalink: String
+        let mediaType: String
+        let hdurl: String?
+
+        enum CodingKeys: String, CodingKey {
+            case date, title, permalink, hdurl
+            case mediaType = "media_type"
         }
     }
 
@@ -153,7 +194,10 @@ private enum ContentSource: CaseIterable {
     static func loadRSS(url: String, source: String) async -> [SspaiArticle] {
         guard let url = URL(string: url), let xml = await loadHTML(from: url) else { return [] }
         return RSSParser.parse(xml).compactMap { item in
-            guard let title = item.title, let link = item.link, let articleURL = URL(string: link), !title.isEmpty else { return nil }
+            guard let rawTitle = item.title, let link = item.link, let articleURL = URL(string: link),
+                  articleURL.scheme == "https" else { return nil }
+            let title = SspaiArticle.htmlText(rawTitle)
+            guard !title.isEmpty else { return nil }
             return SspaiArticle(title: title, url: articleURL, source: source, coverURL: item.imageURL ?? coverURL(in: item.description ?? "", relativeTo: articleURL), date: item.date)
         }
     }
@@ -188,23 +232,6 @@ private enum ContentSource: CaseIterable {
             }
         }
         return nil
-    }
-
-    static func parseLinkedHeadings(_ html: String, source: String, host: String, requiredPath: String) -> [SspaiArticle] {
-        let cardPattern = #"<a\b[^>]*href=[\"']([^\"']+)[\"'][^>]*>(?:(?!</a>)[\s\S])*?<h[1-4]\b[^>]*>([\s\S]*?)</h[1-4]>"#
-        let matches = SspaiArticle.allMatches(cardPattern, in: html)
-        var output: [SspaiArticle] = []
-        var used = Set<String>()
-        for match in matches where match.count == 3 {
-            guard let url = URL(string: match[1], relativeTo: URL(string: host))?.absoluteURL,
-                  url.host == URL(string: host)?.host,
-                  url.path.contains(requiredPath) else { continue }
-            let title = SspaiArticle.htmlText(match[2])
-            guard title.count >= 6, title.count <= 180, used.insert(url.absoluteString).inserted else { continue }
-            output.append(SspaiArticle(title: title, url: url, source: source, coverURL: nil))
-            if output.count == 8 { break }
-        }
-        return output
     }
 
     static func translateTitle(_ title: String) async -> String? {
@@ -362,6 +389,10 @@ private final class RSSParser: NSObject, XMLParserDelegate {
         element = elementName.lowercased()
         text = ""
         if element == "item" || element == "entry" { item = Item() }
+        if element == "link", let href = attributeDict["href"],
+           attributeDict["rel"] == nil || attributeDict["rel"] == "alternate" {
+            item?.link = href
+        }
         if (element == "media:content" || element == "media:thumbnail" || element == "enclosure"), let value = attributeDict["url"], item?.imageURL == nil {
             item?.imageURL = URL(string: value)
         }
@@ -377,7 +408,7 @@ private final class RSSParser: NSObject, XMLParserDelegate {
         case "link": if current.link == nil { current.link = value }
         case "guid": if current.link == nil { current.link = value }
         case "pubdate", "published", "updated": if current.date == nil { current.date = value }
-        case "description", "content:encoded": if current.description == nil { current.description = value }
+        case "description", "content:encoded", "content", "summary": if current.description == nil { current.description = value }
         case "item", "entry":
             if current.title != nil, current.link != nil { items.append(current) }
             item = nil

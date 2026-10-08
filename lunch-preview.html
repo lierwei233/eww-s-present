@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>此刻 · 午餐预览</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: linear-gradient(135deg,#d9e6f3 0%,#f7f1e9 55%,#d9e7dd 100%); color: rgba(31,31,34,.78); font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "PingFang SC", sans-serif; }
+    .panel { width: min(720px, calc(100vw - 32px)); padding: 34px 36px 30px; border-radius: 18px; background: rgba(250,249,246,.52); backdrop-filter: blur(38px) saturate(155%); -webkit-backdrop-filter: blur(38px) saturate(155%); border: 1px solid rgba(255,255,255,.77); box-shadow: 0 16px 42px rgba(62,55,44,.18), inset 0 1px rgba(255,255,255,.52); }
+    .header { display:flex; align-items:center; gap:13px; margin-bottom: 31px; }
+    .logo { width:48px; height:48px; border-radius:14px; background:rgba(240,238,234,.72); display:grid; place-items:center; }
+    .ring { width:27px; height:27px; border:3px solid rgba(37,37,39,.72); border-right-color:transparent; border-radius:50%; position:relative; }
+    .dot { position:absolute; width:6px; height:6px; border-radius:50%; background:rgba(37,37,39,.72); right:-4px; top:8px; }
+    .brand { font-size:20px; font-weight:650; letter-spacing:-.45px; } .brand span { font-weight:400; color:rgba(55,55,58,.61); }
+    .time { margin-left:auto; color:rgba(55,55,58,.43); font-size:16px; font-weight:600; }
+    .eyebrow { font-size:14px; font-weight:600; color:rgba(55,55,58,.61); margin-bottom:16px; }
+    h1 { font-size:28px; line-height:1.18; letter-spacing:-1px; margin:0 0 14px; font-weight:700; }
+    .hint { margin:0 0 24px; font-size:19px; line-height:1.35; color:rgba(55,55,58,.67); }
+    .card { padding:25px; border-radius:18px; background:rgba(255,253,248,.48); border:1px solid rgba(255,255,255,.38); }
+    .order { font-size:22px; font-weight:680; letter-spacing:-.5px; margin-bottom:11px; } .desc { color:rgba(55,55,58,.66); font-size:16px; }
+    .price-row { display:flex; align-items:baseline; justify-content:space-between; margin:20px 0 20px; } .price { font-size:27px; font-weight:720; letter-spacing:-.7px; } .delivery { font-size:16px; color:rgba(55,55,58,.62); }
+    .actions { display:flex; gap:10px; } .action { flex:1; text-align:center; padding:15px 10px; border-radius:14px; text-decoration:none; font-size:16px; font-weight:650; color:rgba(255,255,255,.93); background:rgba(58,58,61,.84); } .action.secondary { color:rgba(42,42,44,.72); background:rgba(251,249,244,.60); }
+    .note { margin:22px 0 0; color:rgba(55,55,58,.43); font-size:14px; } .foot { display:flex; justify-content:space-between; margin-top:27px; color:rgba(55,55,58,.40); font-size:14px; }
+    @media(max-width:560px){ .panel{padding:25px 24px}.brand{font-size:18px}h1{font-size:25px}.hint{font-size:17px}.card{padding:21px}.actions{flex-direction:column}.delivery{font-size:14px} }
+  </style>
+</head>
+<body><main class="panel">
+  <header class="header"><div class="logo"><div class="ring"><i class="dot"></i></div></div><div class="brand">此刻 <span>· 留一顿好饭慢慢吃</span></div><div class="time">12:18</div></header>
+  <div class="eyebrow">午餐时间 · 给你一个选择</div>
+  <h1>午餐，吃份鸡腿饭吧。</h1>
+  <p class="hint">午间好好吃饭，下午继续有精神。</p>
+  <section class="card"><div class="order">照烧鸡腿饭 + 时蔬</div><div class="desc">荤素搭配 · 午餐一份刚刚好</div><div class="price-row"><div class="price">示例 ¥29</div><div class="delivery">预计送达 25–35 分钟</div></div><div class="actions"><a class="action" href="https://waimai.meituan.com/">↗　打开美团外卖</a><a class="action secondary" href="https://maps.apple.com/?q=鸡腿饭">⌁　附近堂食</a></div></section>
+  <p class="note">示例推荐；商家、价格和距离需接入定位及平台后实时提供。</p><footer class="foot"><span>●　只给一个方向 · 你始终可以按自己的节奏决定</span><span>退出</span></footer>
+</main></body></html>

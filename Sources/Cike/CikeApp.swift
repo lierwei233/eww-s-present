@@ -1,6 +1,7 @@
 import AppKit
 import ApplicationServices
 import Combine
+import CoreGraphics
 import SwiftUI
 
 @main
@@ -8,13 +9,15 @@ struct CikeApp: App {
     @StateObject private var contextMonitor = ContextMonitor()
     @StateObject private var mealRecommendations = MeituanTopOneStore()
     @StateObject private var sspaiTopOne = SspaiTopOneStore()
+    @StateObject private var aiCoverGeneration = AICoverGeneration()
 
     var body: some Scene {
         MenuBarExtra {
             RecommendationPopover(
                 contextMonitor: contextMonitor,
                 mealRecommendations: mealRecommendations,
-                sspaiTopOne: sspaiTopOne
+                sspaiTopOne: sspaiTopOne,
+                aiCoverGeneration: aiCoverGeneration
             )
                 .frame(width: 370)
         } label: {
@@ -25,6 +28,10 @@ struct CikeApp: App {
             }
         }
         .menuBarExtraStyle(.window)
+
+        Settings {
+            AICoverSettingsView(generation: aiCoverGeneration)
+        }
     }
 }
 
@@ -94,7 +101,7 @@ private struct OpenFocusLogo: View {
 }
 
 private enum AdviceScene {
-    case lunch, afternoonTea, dinner, night, reply, content, travel, chatPermission, chatUnavailable
+    case lunch, afternoonTea, dinner, night, reply, content, breath, breakReminder, travel, chatPermission, chatUnavailable
 
     static func meal(at date: Date, calendar: Calendar = .current) -> AdviceScene? {
         let parts = calendar.dateComponents([.hour, .minute], from: date)
@@ -134,14 +141,21 @@ private final class ContextMonitor: ObservableObject {
     @Published private(set) var replySuggestion: String?
     @Published private(set) var chatDwellSeconds = 0
     @Published private(set) var chatDiagnostic = ""
+    @Published private(set) var continuousUseMinutes = 0
 
     private let weChatBundleID = "com.tencent.xinWeChat"
     private let travelPreviewKey = "Cike.previewTravelRecommendation"
+    private let breathPresentationPrefix = "Cike.breathPresentation"
+    private let useSessionStartKey = "Cike.continuousUseStartedAt"
+    private let breakReminderCountPrefix = "Cike.breakReminderCount"
+    private let restBreakThreshold: TimeInterval = 5 * 60
     private var weChatBecameActiveAt: Date?
     private var lastContextReadAt: Date?
     private var timer: Timer?
+    private var continuousUseStartedAt: Date?
 
     init() {
+        continuousUseStartedAt = UserDefaults.standard.object(forKey: useSessionStartKey) as? Date
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
@@ -154,6 +168,7 @@ private final class ContextMonitor: ObservableObject {
     }
 
     private func refresh(now: Date = .now) {
+        refreshContinuousUse(now: now)
         if UserDefaults.standard.bool(forKey: travelPreviewKey) {
             setScene(.travel)
             return
@@ -176,6 +191,14 @@ private final class ContextMonitor: ObservableObject {
 
         if let meal = AdviceScene.meal(at: now), canPresent(meal, at: now) {
             setScene(meal)
+            return
+        }
+        if canOfferBreakReminder {
+            setScene(.breakReminder)
+            return
+        }
+        if canOfferBreath(at: now) {
+            setScene(.breath)
             return
         }
         setScene(.content)
@@ -217,7 +240,7 @@ private final class ContextMonitor: ObservableObject {
         // Avoid publishing every second when the scene has not changed.
         switch (scene, newScene) {
         case (.lunch, .lunch), (.afternoonTea, .afternoonTea), (.dinner, .dinner), (.night, .night), (.reply, .reply),
-             (.content, .content), (.chatPermission, .chatPermission), (.chatUnavailable, .chatUnavailable):
+             (.content, .content), (.breath, .breath), (.breakReminder, .breakReminder), (.chatPermission, .chatPermission), (.chatUnavailable, .chatUnavailable):
             break
         default:
             scene = newScene
@@ -225,11 +248,17 @@ private final class ContextMonitor: ObservableObject {
     }
 
     func recordPresentation(of scene: AdviceScene, now: Date = .now) {
-        guard let meal = MealPeriod(scene) else { return }
-        let key = mealCountKey(for: meal, at: now)
-        let count = UserDefaults.standard.integer(forKey: key)
-        guard count < 2 else { return }
-        UserDefaults.standard.set(count + 1, forKey: key)
+        if let meal = MealPeriod(scene) {
+            let key = mealCountKey(for: meal, at: now)
+            let count = UserDefaults.standard.integer(forKey: key)
+            guard count < 2 else { return }
+            UserDefaults.standard.set(count + 1, forKey: key)
+        } else if scene == .breath {
+            UserDefaults.standard.set(true, forKey: breathPresentationKey(at: now))
+        } else if scene == .breakReminder, let sessionKey = continuousUseSessionKey {
+            let key = "\(breakReminderCountPrefix).\(sessionKey)"
+            UserDefaults.standard.set(UserDefaults.standard.integer(forKey: key) + 1, forKey: key)
+        }
     }
 
     @discardableResult
@@ -256,6 +285,47 @@ private final class ContextMonitor: ObservableObject {
     private func canPresent(_ scene: AdviceScene, at date: Date) -> Bool {
         guard let meal = MealPeriod(scene) else { return false }
         return UserDefaults.standard.integer(forKey: mealCountKey(for: meal, at: date)) < 2
+    }
+
+    private func canOfferBreath(at date: Date) -> Bool {
+        let parts = Calendar.current.dateComponents([.hour, .minute], from: date)
+        guard let hour = parts.hour, let minute = parts.minute,
+              [10, 14, 20].contains(hour), minute < 30 else { return false }
+        return !UserDefaults.standard.bool(forKey: breathPresentationKey(at: date))
+    }
+
+    private func refreshContinuousUse(now: Date) {
+        let idleSeconds = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .null)
+        guard idleSeconds < restBreakThreshold else {
+            continuousUseStartedAt = nil
+            continuousUseMinutes = 0
+            UserDefaults.standard.removeObject(forKey: useSessionStartKey)
+            return
+        }
+        if continuousUseStartedAt == nil {
+            continuousUseStartedAt = now.addingTimeInterval(-min(idleSeconds, 30))
+            UserDefaults.standard.set(continuousUseStartedAt, forKey: useSessionStartKey)
+        }
+        let minutes = max(0, Int(now.timeIntervalSince(continuousUseStartedAt ?? now) / 60))
+        continuousUseMinutes = minutes
+    }
+
+    private var continuousUseSessionKey: String? {
+        guard let continuousUseStartedAt else { return nil }
+        return String(Int(continuousUseStartedAt.timeIntervalSince1970))
+    }
+
+    private var canOfferBreakReminder: Bool {
+        guard let sessionKey = continuousUseSessionKey else { return false }
+        let count = UserDefaults.standard.integer(forKey: "\(breakReminderCountPrefix).\(sessionKey)")
+        if count == 0 { return continuousUseMinutes >= 45 }
+        if count == 1 { return continuousUseMinutes >= 60 }
+        return false
+    }
+
+    private func breathPresentationKey(at date: Date) -> String {
+        let hour = Calendar.current.component(.hour, from: date)
+        return "\(breathPresentationPrefix).\(Self.dayFormatter.string(from: date)).\(hour)"
     }
 
     private func mealCountKey(for meal: MealPeriod, at date: Date) -> String {
@@ -364,21 +434,28 @@ private struct RecommendationPopover: View {
     @ObservedObject var contextMonitor: ContextMonitor
     @ObservedObject var mealRecommendations: MeituanTopOneStore
     @ObservedObject var sspaiTopOne: SspaiTopOneStore
+    @ObservedObject var aiCoverGeneration: AICoverGeneration
     private var scene: AdviceScene { contextMonitor.presentedScene ?? contextMonitor.scene }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header.padding(.bottom, 26)
-            switch scene {
-            case .reply: ReplyAdvice(suggestion: contextMonitor.replySuggestion)
-            case .content: ContentAdvice(article: sspaiTopOne.article, contentStore: sspaiTopOne)
-            case .lunch: FoodAdvice(meal: .lunch, mealRecommendations: mealRecommendations)
-            case .afternoonTea: FoodAdvice(meal: .afternoonTea, mealRecommendations: mealRecommendations)
-            case .dinner: FoodAdvice(meal: .dinner, mealRecommendations: mealRecommendations)
-            case .night: FoodAdvice(meal: .night, mealRecommendations: mealRecommendations)
-            case .travel: TravelAdvice()
-            case .chatPermission: ChatPermissionAdvice(dwell: contextMonitor.chatDwellSeconds, diagnostic: contextMonitor.chatDiagnostic, onEnable: contextMonitor.requestAccessibilityPermission)
-            case .chatUnavailable: ChatUnavailableAdvice(diagnostic: contextMonitor.chatDiagnostic)
+            if aiCoverGeneration.isShowingSetup {
+                AICoverSetupAdvice(generation: aiCoverGeneration)
+            } else {
+                switch scene {
+                case .reply: ReplyAdvice(suggestion: contextMonitor.replySuggestion)
+                case .content: ContentAdvice(article: sspaiTopOne.article, contentStore: sspaiTopOne, aiCoverGeneration: aiCoverGeneration)
+                case .breath: BreathAdvice()
+                case .breakReminder: BreakReminderAdvice(minutes: contextMonitor.continuousUseMinutes)
+                case .lunch: FoodAdvice(meal: .lunch, mealRecommendations: mealRecommendations)
+                case .afternoonTea: FoodAdvice(meal: .afternoonTea, mealRecommendations: mealRecommendations)
+                case .dinner: FoodAdvice(meal: .dinner, mealRecommendations: mealRecommendations)
+                case .night: FoodAdvice(meal: .night, mealRecommendations: mealRecommendations)
+                case .travel: TravelAdvice()
+                case .chatPermission: ChatPermissionAdvice(dwell: contextMonitor.chatDwellSeconds, diagnostic: contextMonitor.chatDiagnostic, onEnable: contextMonitor.requestAccessibilityPermission)
+                case .chatUnavailable: ChatUnavailableAdvice(diagnostic: contextMonitor.chatDiagnostic)
+                }
             }
             footer.padding(.top, 14)
         }
@@ -431,6 +508,8 @@ private struct RecommendationPopover: View {
     private var subtitle: String {
         switch scene {
         case .content: "留一篇好内容慢慢读"
+        case .breath: "需要换换气么"
+        case .breakReminder: "连续用太久了，休息一下"
         case .lunch: "来一份午餐吧"
         case .afternoonTea: "来一份下午茶吧"
         case .dinner: "来一份晚餐吧"
@@ -479,27 +558,82 @@ private struct ReplyAdvice: View {
     }
 }
 
-private struct ContentAdvice: View {
-    var article: SspaiArticle?
-    @ObservedObject var contentStore: SspaiTopOneStore
+private struct BreathAdvice: View {
+    private var advice: (title: String, detail: String) {
+        switch Calendar.current.component(.hour, from: .now) {
+        case 10:
+            ("站起来，看看远处 30 秒。", "不用解决什么，只让眼睛离开屏幕一会儿。")
+        case 14:
+            ("去接一杯水，慢慢喝完。", "先离开座位两分钟，回来再继续。")
+        default:
+            ("把肩膀放松，深呼吸三次。", "今天还没结束，但这一分钟可以只留给自己。")
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            if let coverURL = article?.coverURL {
-                AsyncImage(url: coverURL, transaction: Transaction(animation: .easeInOut(duration: 0.18))) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image
-                            .resizable()
-                            .scaledToFill()
-                    default:
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .fill(CikePalette.smallCardSurface)
+            Text(advice.title)
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(CikePalette.primaryText)
+            Text(advice.detail)
+                .font(.system(size: 13))
+                .foregroundStyle(.secondary)
+            Label("大约 30 秒", systemImage: "timer")
+                .font(.system(size: 11))
+                .foregroundStyle(.tertiary)
+        }
+        .frame(minHeight: 96, alignment: .top)
+    }
+}
+
+private struct BreakReminderAdvice: View {
+    let minutes: Int
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("你已经连续用 Mac \(minutes) 分钟了。")
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(CikePalette.primaryText)
+            Text("现在起身走几步，再回来继续。")
+                .font(.system(size: 13))
+                .foregroundStyle(.secondary)
+            Label("离开屏幕 3 分钟", systemImage: "figure.walk")
+                .font(.system(size: 11))
+                .foregroundStyle(.tertiary)
+        }
+        .frame(minHeight: 96, alignment: .top)
+    }
+}
+
+private struct ContentAdvice: View {
+    var article: SspaiArticle?
+    @ObservedObject var contentStore: SspaiTopOneStore
+    @ObservedObject var aiCoverGeneration: AICoverGeneration
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if let article {
+                if let coverURL = aiCoverGeneration.imageURL(for: article) ?? article.coverURL {
+                    AsyncImage(url: coverURL, transaction: Transaction(animation: .easeInOut(duration: 0.18))) { phase in
+                        switch phase {
+                        case .success(let image):
+                            image
+                                .resizable()
+                                .scaledToFill()
+                        case .failure:
+                            coverPlaceholder(for: article, failedToLoadOriginal: true)
+                        default:
+                            coverPlaceholder(for: article, failedToLoadOriginal: false)
+                        }
                     }
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 118)
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                } else {
+                    coverPlaceholder(for: article, failedToLoadOriginal: false)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 118)
                 }
-                .frame(maxWidth: .infinity)
-                .frame(height: 118)
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
             Text(article?.title ?? "正在为你找一篇值得读的内容。")
                 .font(.system(size: 18, weight: .semibold))
@@ -517,6 +651,38 @@ private struct ContentAdvice: View {
             }
         }
         .frame(minHeight: 96, alignment: .top)
+        .task(id: article?.url) {
+            if let article { aiCoverGeneration.generateIfNeeded(for: article) }
+        }
+    }
+
+    @ViewBuilder
+    private func coverPlaceholder(for article: SspaiArticle, failedToLoadOriginal: Bool) -> some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(CikePalette.smallCardSurface)
+            if aiCoverGeneration.isGenerating(article) {
+                HStack(spacing: 7) {
+                    ProgressView().controlSize(.small)
+                    Text("正在生成这篇内容的封面")
+                }
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            } else if !aiCoverGeneration.hasAPIKey {
+                Text("在设置中保存 API Key 后生成封面")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            } else if aiCoverGeneration.hasFailed(article) {
+                Text("这篇内容暂时未能生成封面")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            } else if failedToLoadOriginal {
+                Text("正在准备替代封面")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .task { aiCoverGeneration.generateIfNeeded(for: article, force: true) }
+            }
+        }
     }
 }
 

@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>此刻 · AI 封面生成预览</title>
+  <style>
+    :root { color-scheme: light; font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "PingFang SC", sans-serif; color: #303033; background:#f5f4f1; }
+    * { box-sizing:border-box; } body { margin:0; padding:56px 24px 80px; } main { width:min(920px,100%); margin:auto; }
+    .eyebrow { font-size:13px; color:#83827e; letter-spacing:.04em; margin:0 0 8px; } h1 { font-size:32px; margin:0; letter-spacing:-.04em; } .intro { margin:14px 0 36px; color:#70706d; line-height:1.7; }
+    .grid { display:grid; grid-template-columns: 1.05fr .95fr; gap:20px; } .panel { background:rgba(255,255,255,.78); border:1px solid rgba(73,73,70,.12); border-radius:22px; padding:24px; box-shadow: 0 18px 36px rgba(45,43,37,.06); }
+    h2 { font-size:15px; margin:0 0 18px; } .change { display:grid; grid-template-columns:1fr auto 1fr; gap:12px; align-items:center; padding:15px 0; border-top:1px solid #e9e8e4; } .change:first-of-type{border-top:0;padding-top:0}.label{font-size:12px;color:#8a8985;margin-bottom:5px}.old{color:#969590;font-size:14px}.new{font-size:14px;font-weight:600}.arrow{color:#a6a49f}
+    .flow { display:flex; align-items:stretch; gap:10px; margin:12px 0 22px; } .step { flex:1; min-width:0; padding:12px; background:#f1f0ec; border-radius:13px; font-size:12px; line-height:1.45; } .step strong { display:block; margin-bottom:3px; font-size:13px; }.flow b{align-self:center;color:#aaa8a2}.note{font-size:12px;color:#777671;line-height:1.65;margin:0}
+    .card { margin-top:20px; padding:20px; background:rgba(248,247,243,.92); border:1px solid rgba(60,60,57,.12); border-radius:20px; } .top { display:flex; align-items:center; gap:9px; color:#61615f; font-size:14px; font-weight:600; }.mark { width:20px;height:20px;border:2px solid #696966;border-radius:50%;position:relative }.mark:after{content:"";width:5px;height:5px;border-radius:50%;background:#696966;position:absolute;right:0;top:-3px}.hero{height:150px;margin:18px 0;border-radius:14px;overflow:hidden;position:relative;background:linear-gradient(126deg,#07151a,#1c4248 40%,#dba76b 41%,#75473f 66%,#0f272e)}.hero:after{content:"";position:absolute;inset:0;background:radial-gradient(ellipse at 64% 38%,rgba(255,217,142,.82),transparent 13%),radial-gradient(ellipse at 29% 76%,rgba(126,212,213,.54),transparent 24%),linear-gradient(90deg,rgba(0,0,0,.1),transparent 55%)}.card h3{font-size:21px;letter-spacing:-.025em;margin:0 0 8px}.meta{color:#85837f;font-size:13px}.button{margin-top:17px;padding:12px;text-align:center;color:#fff;background:rgba(42,42,45,.79);border-radius:12px;font-size:14px;font-weight:600}
+    .caption{font-size:12px;color:#888681;margin:12px 0 0;line-height:1.6}.pill{display:inline-block;background:#e6f0e8;color:#536a57;border-radius:99px;padding:4px 8px;font-size:11px;font-weight:600;margin-bottom:10px}
+    @media(max-width:720px){ body{padding:32px 16px}.grid{grid-template-columns:1fr}.flow{gap:6px}.step{padding:10px;font-size:11px}.flow b{font-size:10px} }
+  </style>
+</head>
+<body><main>
+  <p class="eyebrow">此刻 · AI 封面生成</p>
+  <h1>更快地补上一张封面</h1>
+  <p class="intro">无原图或原图失效时，内容先立即出现，封面在后台生成并写入本机缓存。已有原图不会调用模型。</p>
+  <div class="grid">
+    <section class="panel"><h2>本次改动</h2>
+      <div class="change"><div><div class="label">标题理解</div><div class="old">qwen3.8-max</div></div><div class="arrow">→</div><div><div class="label">更轻的同系列模型</div><div class="new">qwen3.8-flash</div></div></div>
+      <div class="change"><div><div class="label">文字输出上限</div><div class="old">160 tokens</div></div><div class="arrow">→</div><div><div class="label">只够一条画面提示词</div><div class="new">80 tokens</div></div></div>
+      <div class="change"><div><div class="label">图片规格</div><div class="old">1472 × 1104 · 4:3</div></div><div class="arrow">→</div><div><div class="label">更贴近卡片横向裁切</div><div class="new">1536 × 864 · 16:9</div></div></div>
+      <p class="caption">一张图、关闭万相自动扩写、写入本机缓存。再次打开同一篇内容时不再产生等待。</p>
+    </section>
+    <section class="panel"><span class="pill">示例链路</span><h2>从标题到封面</h2>
+      <div class="flow"><div class="step"><strong>1. 标题</strong>播客：汤普森冰屋</div><b>→</b><div class="step"><strong>2. Flash</strong>北境木屋、暖灯、冰湖与暮色</div><b>→</b><div class="step"><strong>3. Wan</strong>生成一张横向编辑封面</div></div>
+      <p class="note">内容卡片不会等待图片才展示：标题、来源和原文链接会立刻出现；封面准备好后平滑替换状态区域。</p>
+      <div class="card"><div class="top"><i class="mark"></i> 此刻 · 留一篇好内容慢慢读</div><div class="hero"></div><h3>播客：汤普森冰屋</h3><div class="meta">Atlas Obscura · 2026 年 9 月 22 日</div><div class="button">↗　阅读原文</div></div>
+      <p class="caption">此处为生成结果的展示比例示意，不是实际生成图片。</p>
+    </section>
+  </div>
+</main></body></html>
