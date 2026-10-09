@@ -1,5 +1,4 @@
 import AppKit
-import ApplicationServices
 import Combine
 import CoreGraphics
 import SwiftUI
@@ -101,7 +100,7 @@ private struct OpenFocusLogo: View {
 }
 
 private enum AdviceScene {
-    case lunch, afternoonTea, dinner, night, reply, content, breath, breakReminder, travel, chatPermission, chatUnavailable
+    case lunch, afternoonTea, dinner, night, content, breath, breakReminder, travel
 
     static func meal(at date: Date, calendar: Calendar = .current) -> AdviceScene? {
         let parts = calendar.dateComponents([.hour, .minute], from: date)
@@ -132,69 +131,76 @@ private enum AdviceScene {
     static func travelTitle(at date: Date) -> String {
         "\(holidayName(at: date) ?? "假日")出游灵感"
     }
+
+    var eventID: String {
+        switch self {
+        case .lunch: "lunch"
+        case .afternoonTea: "afternoon_tea"
+        case .dinner: "dinner"
+        case .night: "night_snack"
+        case .content: "content"
+        case .breath: "breath"
+        case .breakReminder: "break_reminder"
+        case .travel: "travel"
+        }
+    }
 }
 
 @MainActor
 private final class ContextMonitor: ObservableObject {
-    @Published private(set) var scene: AdviceScene = .reply
+    @Published private(set) var scene: AdviceScene = .content
     @Published private(set) var presentedScene: AdviceScene?
-    @Published private(set) var replySuggestion: String?
-    @Published private(set) var chatDwellSeconds = 0
-    @Published private(set) var chatDiagnostic = ""
     @Published private(set) var continuousUseMinutes = 0
 
-    private let weChatBundleID = "com.tencent.xinWeChat"
     private let travelPreviewKey = "Cike.previewTravelRecommendation"
     private let breathPresentationPrefix = "Cike.breathPresentation"
     private let useSessionStartKey = "Cike.continuousUseStartedAt"
     private let breakReminderCountPrefix = "Cike.breakReminderCount"
     private let restBreakThreshold: TimeInterval = 5 * 60
-    private var weChatBecameActiveAt: Date?
-    private var lastWeChatFrontmostAt: Date?
-    private var lastContextReadAt: Date?
     private var timer: Timer?
+    private var appActivationObserver: NSObjectProtocol?
     private var continuousUseStartedAt: Date?
+    private var lastExternalBundleID: String?
+    private var presentationStartedAt: Date?
 
     init() {
         continuousUseStartedAt = UserDefaults.standard.object(forKey: useSessionStartKey) as? Date
         refresh()
-        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refresh() }
+        appActivationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                if NSWorkspace.shared.frontmostApplication?.bundleIdentifier != Bundle.main.bundleIdentifier {
+                    self.refresh()
+                }
+            }
+        }
+        scheduleTimer()
+    }
+
+    private func scheduleTimer() {
+        timer?.invalidate()
+        timer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.refresh()
+            }
         }
         if let timer { RunLoop.main.add(timer, forMode: .common) }
     }
 
-    func requestAccessibilityPermission() {
-        _ = AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary)
-    }
-
-    private func refresh(now: Date = .now, openingPopover: Bool = false) {
+    private func refresh(now: Date = .now) {
         refreshContinuousUse(now: now)
+        let frontmostID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        if let frontmostID, frontmostID != Bundle.main.bundleIdentifier {
+            lastExternalBundleID = frontmostID
+        }
+
         if UserDefaults.standard.bool(forKey: travelPreviewKey) {
             setScene(.travel)
             return
-        }
-        let frontmostID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
-        if frontmostID == weChatBundleID { lastWeChatFrontmostAt = now }
-        let openedFromWeChat = openingPopover &&
-            frontmostID == Bundle.main.bundleIdentifier &&
-            now.timeIntervalSince(lastWeChatFrontmostAt ?? .distantPast) < 2
-        let hasFocusedReply = (frontmostID == weChatBundleID || openedFromWeChat) &&
-            AXIsProcessTrusted() &&
-            WeChatAccessibilityReader.isReplyComposerFocused(bundleID: weChatBundleID)
-        if hasFocusedReply {
-            if weChatBecameActiveAt == nil { weChatBecameActiveAt = now }
-            let elapsed = Int(now.timeIntervalSince(weChatBecameActiveAt ?? now))
-            chatDwellSeconds = elapsed
-            if elapsed >= 7 {
-                if updateChatSuggestion(now: now, forceRead: openingPopover) { return }
-            }
-        } else {
-            weChatBecameActiveAt = nil
-            lastContextReadAt = nil
-            replySuggestion = nil
-            chatDiagnostic = ""
-            chatDwellSeconds = 0
         }
 
         if let meal = AdviceScene.meal(at: now), canPresent(meal, at: now) {
@@ -212,40 +218,11 @@ private final class ContextMonitor: ObservableObject {
         setScene(.content)
     }
 
-    @discardableResult
-    private func updateChatSuggestion(now: Date, forceRead: Bool = false) -> Bool {
-        if !forceRead, let lastContextReadAt, now.timeIntervalSince(lastContextReadAt) < 3 {
-            return true
-        }
-        lastContextReadAt = now
-        guard let snapshot = WeChatAccessibilityReader.focusedConversation(bundleID: weChatBundleID) else {
-            lastContextReadAt = nil
-            replySuggestion = nil
-            chatDiagnostic = ""
-            return false
-        }
-        guard snapshot.isReplyComposer else {
-            lastContextReadAt = nil
-            replySuggestion = nil
-            chatDiagnostic = ""
-            return false
-        }
-        guard !snapshot.visibleText.isEmpty else {
-            chatDiagnostic = "已识别到回复框，但微信没有提供可读取的可见对话文字。"
-            setScene(.chatUnavailable)
-            return true
-        }
-        replySuggestion = LocalReplyComposer.suggestion(for: snapshot.visibleText)
-        chatDiagnostic = "已读取当前微信窗口的可见文字，并在本机生成建议。"
-        setScene(.reply)
-        return true
-    }
-
     private func setScene(_ newScene: AdviceScene) {
         // Avoid publishing every second when the scene has not changed.
         switch (scene, newScene) {
-        case (.lunch, .lunch), (.afternoonTea, .afternoonTea), (.dinner, .dinner), (.night, .night), (.reply, .reply),
-             (.content, .content), (.breath, .breath), (.breakReminder, .breakReminder), (.chatPermission, .chatPermission), (.chatUnavailable, .chatUnavailable):
+        case (.lunch, .lunch), (.afternoonTea, .afternoonTea), (.dinner, .dinner), (.night, .night),
+             (.content, .content), (.breath, .breath), (.breakReminder, .breakReminder):
             break
         default:
             scene = newScene
@@ -268,9 +245,15 @@ private final class ContextMonitor: ObservableObject {
 
     @discardableResult
     func beginPresentation() -> AdviceScene {
-        refresh(openingPopover: true)
+        refresh()
         let selectedScene = scene
         presentedScene = selectedScene
+        presentationStartedAt = .now
+        recordEvent(
+            what: "assistant_opened",
+            appBundleID: lastExternalBundleID,
+            intent: selectedScene.eventID
+        )
         recordPresentation(of: selectedScene)
         if selectedScene == .travel {
             UserDefaults.standard.removeObject(forKey: travelPreviewKey)
@@ -285,7 +268,46 @@ private final class ContextMonitor: ObservableObject {
     }
 
     func endPresentation() {
+        if let presentationStartedAt {
+            recordEvent(
+                what: "assistant_closed",
+                appBundleID: lastExternalBundleID,
+                intent: presentedScene?.eventID,
+                durationSeconds: max(0, Int(Date.now.timeIntervalSince(presentationStartedAt)))
+            )
+        }
+        presentationStartedAt = nil
         presentedScene = nil
+    }
+
+    func recordExternalAction(_ action: String, destination: URL) {
+        recordEvent(
+            what: action,
+            appBundleID: lastExternalBundleID,
+            intent: presentedScene?.eventID,
+            targetID: ContextEventStore.opaqueID(for: destination.absoluteString)
+        )
+    }
+
+    private func recordEvent(
+        what: String,
+        at date: Date = .now,
+        appBundleID: String?,
+        surface: String? = nil,
+        intent: String? = nil,
+        targetID: String? = nil,
+        durationSeconds: Int? = nil
+    ) {
+        let event = ContextEvent(
+            when: date,
+            appBundleID: appBundleID,
+            surface: surface,
+            what: what,
+            inference: intent.map { ContextEvent.Inference(intent: $0, source: "current_rules") },
+            targetID: targetID,
+            durationSeconds: durationSeconds
+        )
+        Task { await ContextEventStore.shared.record(event) }
     }
 
     private func canPresent(_ scene: AdviceScene, at date: Date) -> Bool {
@@ -360,97 +382,6 @@ private extension MealPeriod {
     }
 }
 
-private enum WeChatAccessibilityReader {
-    struct FocusedConversation {
-        let role: String
-        let label: String
-        let visibleText: [String]
-
-        var isReplyComposer: Bool {
-            let normalizedLabel = label.lowercased()
-            if normalizedLabel.contains("搜索") || normalizedLabel.contains("search") { return false }
-            if role == (kAXTextAreaRole as String) || role == "AXTextView" { return true }
-            return role == (kAXTextFieldRole as String)
-        }
-    }
-
-    static func isReplyComposerFocused(bundleID: String) -> Bool {
-        guard let runningApp = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first else { return false }
-        let appElement = AXUIElementCreateApplication(runningApp.processIdentifier)
-        guard let focused = copyAttribute(kAXFocusedUIElementAttribute as CFString, from: appElement),
-              CFGetTypeID(focused) == AXUIElementGetTypeID(),
-              let window = copyAttribute(kAXFocusedWindowAttribute as CFString, from: appElement),
-              CFGetTypeID(window) == AXUIElementGetTypeID() else { return false }
-        let element = unsafeDowncast(focused, to: AXUIElement.self)
-        let role = (copyAttribute(kAXRoleAttribute as CFString, from: element) as? String) ?? ""
-        let label = [kAXPlaceholderValueAttribute, kAXDescriptionAttribute, kAXTitleAttribute]
-            .compactMap { copyAttribute($0 as CFString, from: element) as? String }
-            .joined(separator: " ")
-        return FocusedConversation(role: role, label: label, visibleText: []).isReplyComposer
-    }
-
-    static func focusedConversation(bundleID: String) -> FocusedConversation? {
-        guard let runningApp = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first else { return nil }
-        let appElement = AXUIElementCreateApplication(runningApp.processIdentifier)
-        guard let focusRef = copyAttribute(kAXFocusedUIElementAttribute as CFString, from: appElement),
-              CFGetTypeID(focusRef) == AXUIElementGetTypeID(),
-              let windowRef = copyAttribute(kAXFocusedWindowAttribute as CFString, from: appElement),
-              CFGetTypeID(windowRef) == AXUIElementGetTypeID() else { return nil }
-        let focusedElement = unsafeDowncast(focusRef, to: AXUIElement.self)
-        let role = (copyAttribute(kAXRoleAttribute as CFString, from: focusedElement) as? String) ?? ""
-        let label = [kAXPlaceholderValueAttribute, kAXDescriptionAttribute, kAXTitleAttribute]
-            .compactMap { copyAttribute($0 as CFString, from: focusedElement) as? String }
-            .joined(separator: " ")
-        let window = unsafeDowncast(windowRef, to: AXUIElement.self)
-        var values: [String] = []
-        collectText(from: window, depth: 0, values: &values)
-        var unique: [String] = []
-        for value in values where !unique.contains(value) { unique.append(value) }
-        return FocusedConversation(role: role, label: label, visibleText: Array(unique.suffix(40)))
-    }
-
-    private static func collectText(from element: AXUIElement, depth: Int, values: inout [String]) {
-        guard depth < 12, values.count < 100 else { return }
-        let role = copyAttribute(kAXRoleAttribute as CFString, from: element) as? String
-        if role == (kAXStaticTextRole as String) || role == (kAXTextFieldRole as String) || role == (kAXTextAreaRole as String) {
-            let value = (copyAttribute(kAXValueAttribute as CFString, from: element) as? String)
-                ?? (copyAttribute(kAXTitleAttribute as CFString, from: element) as? String)
-            if let value {
-                let cleaned = value.trimmingCharacters(in: .whitespacesAndNewlines)
-                if cleaned.count >= 2 && cleaned.count <= 500 { values.append(cleaned) }
-            }
-        }
-        guard let children = copyAttribute(kAXChildrenAttribute as CFString, from: element) as? [AXUIElement] else { return }
-        for child in children { collectText(from: child, depth: depth + 1, values: &values) }
-    }
-
-    private static func copyAttribute(_ attribute: CFString, from element: AXUIElement) -> CFTypeRef? {
-        var result: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, attribute, &result) == .success else { return nil }
-        return result
-    }
-}
-
-private enum LocalReplyComposer {
-    static func suggestion(for visibleText: [String]) -> String {
-        let context = visibleText.suffix(20).joined(separator: " ")
-        if containsAny(context, ["有空吗", "要不要一起", "一起去", "约吗", "出来吗", "周末有空"]) {
-            return "「谢谢你想到我。我看看安排，晚点给你答复。」"
-        }
-        if containsAny(context, ["能不能帮", "可以帮我", "麻烦你", "方便帮", "帮我一下"]) {
-            return "「我先确认一下手头的安排，稍后回复你。」"
-        }
-        if context.contains("？") || context.contains("?") {
-            return "「我看到了，想清楚后认真回复你。」"
-        }
-        return "「我收到啦，给我一点时间想想，晚些回复你。」"
-    }
-
-    private static func containsAny(_ text: String, _ phrases: [String]) -> Bool {
-        phrases.contains(where: text.contains)
-    }
-}
-
 private struct RecommendationPopover: View {
     @ObservedObject var contextMonitor: ContextMonitor
     @ObservedObject var mealRecommendations: MeituanTopOneStore
@@ -465,17 +396,14 @@ private struct RecommendationPopover: View {
                 AICoverSetupAdvice(generation: aiCoverGeneration)
             } else {
                 switch scene {
-                case .reply: ReplyAdvice(suggestion: contextMonitor.replySuggestion)
-                case .content: ContentAdvice(article: sspaiTopOne.article, contentStore: sspaiTopOne, aiCoverGeneration: aiCoverGeneration)
+                case .content: ContentAdvice(article: sspaiTopOne.article, contentStore: sspaiTopOne, aiCoverGeneration: aiCoverGeneration, contextMonitor: contextMonitor)
                 case .breath: BreathAdvice()
                 case .breakReminder: BreakReminderAdvice(minutes: contextMonitor.continuousUseMinutes)
-                case .lunch: FoodAdvice(meal: .lunch, mealRecommendations: mealRecommendations)
-                case .afternoonTea: FoodAdvice(meal: .afternoonTea, mealRecommendations: mealRecommendations)
-                case .dinner: FoodAdvice(meal: .dinner, mealRecommendations: mealRecommendations)
-                case .night: FoodAdvice(meal: .night, mealRecommendations: mealRecommendations)
-                case .travel: TravelAdvice()
-                case .chatPermission: ChatPermissionAdvice(dwell: contextMonitor.chatDwellSeconds, diagnostic: contextMonitor.chatDiagnostic, onEnable: contextMonitor.requestAccessibilityPermission)
-                case .chatUnavailable: ChatUnavailableAdvice(diagnostic: contextMonitor.chatDiagnostic)
+                case .lunch: FoodAdvice(meal: .lunch, mealRecommendations: mealRecommendations, contextMonitor: contextMonitor)
+                case .afternoonTea: FoodAdvice(meal: .afternoonTea, mealRecommendations: mealRecommendations, contextMonitor: contextMonitor)
+                case .dinner: FoodAdvice(meal: .dinner, mealRecommendations: mealRecommendations, contextMonitor: contextMonitor)
+                case .night: FoodAdvice(meal: .night, mealRecommendations: mealRecommendations, contextMonitor: contextMonitor)
+                case .travel: TravelAdvice(contextMonitor: contextMonitor)
                 }
             }
             footer.padding(.top, 14)
@@ -536,8 +464,6 @@ private struct RecommendationPopover: View {
         case .dinner: "来一份晚餐吧"
         case .night: "来一份夜宵吧"
         case .travel: AdviceScene.travelTitle(at: .now)
-        case .reply: "留一句合适的话慢慢回"
-        case .chatPermission, .chatUnavailable: "先听听你心里的话"
         }
     }
 
@@ -556,26 +482,6 @@ private struct RecommendationPopover: View {
                 .foregroundStyle(.tertiary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
-
-private struct ReplyAdvice: View {
-    var suggestion: String?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            eyebrow("根据微信当前可见对话")
-            Text(suggestion ?? "先回：「我看到了，给我一点时间想想，晚些回复你。」")
-                .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(CikePalette.primaryText)
-                .fixedSize(horizontal: false, vertical: true)
-                .lineSpacing(3)
-            Text("建议在本机根据当前可见文字生成，不会自动发送。")
-                .font(.system(size: 12)).foregroundStyle(.secondary)
-            Divider().padding(.vertical, 3)
-            Label("先照顾好自己的感受，再决定下一步。", systemImage: "sparkle")
-                .font(.system(size: 11)).foregroundStyle(.secondary)
-        }
     }
 }
 
@@ -630,6 +536,7 @@ private struct ContentAdvice: View {
     var article: SspaiArticle?
     @ObservedObject var contentStore: SspaiTopOneStore
     @ObservedObject var aiCoverGeneration: AICoverGeneration
+    @ObservedObject var contextMonitor: ContextMonitor
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -664,7 +571,10 @@ private struct ContentAdvice: View {
             Text(article?.metadataText.isEmpty == false ? article!.metadataText : "内容加载后会附上原文链接。")
                 .font(.system(size: 12)).foregroundStyle(.secondary)
             if let article {
-                Link(destination: article.url) {
+                Button {
+                    contextMonitor.recordExternalAction("article_opened", destination: article.url)
+                    NSWorkspace.shared.open(article.url)
+                } label: {
                     Label("阅读原文", systemImage: "arrow.up.right")
                         .frame(maxWidth: .infinity)
                 }
@@ -725,43 +635,6 @@ private struct ContentAdvice: View {
                     .foregroundStyle(.secondary)
                     .task { aiCoverGeneration.generateIfNeeded(for: article, force: true) }
             }
-        }
-    }
-}
-
-private struct ChatPermissionAdvice: View {
-    let dwell: Int
-    let diagnostic: String
-    let onEnable: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            eyebrow("微信对话停留 \(dwell) 秒")
-            Text("需要一点上下文，才能帮你想回复。")
-                .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(CikePalette.primaryText)
-            Text("允许「此刻」读取微信当前窗口的可见文字。内容只在本机临时处理，不会保存、上传或自动发送。")
-                .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            Button(action: onEnable) {
-                Label("开启微信上下文辅助", systemImage: "hand.raised").frame(maxWidth: .infinity)
-            }
-            .buttonStyle(GlassActionStyle(isPrimary: true))
-            Text(diagnostic).font(.system(size: 9)).foregroundStyle(.tertiary)
-        }
-    }
-}
-
-private struct ChatUnavailableAdvice: View {
-    let diagnostic: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            eyebrow("微信对话")
-            Text("我还没读到当前对话内容。")
-                .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(CikePalette.primaryText)
-            Text(diagnostic.isEmpty ? "请保持目标聊天窗口在前台，并确认「此刻」拥有辅助功能权限。内容只在本机处理；建议生成后仍由你决定是否使用。" : diagnostic)
-                .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
     }
 }
@@ -872,6 +745,7 @@ private final class WindowCornerRadiusView: NSView {
 private struct FoodAdvice: View {
     let meal: MealPeriod
     @ObservedObject var mealRecommendations: MeituanTopOneStore
+    @ObservedObject var contextMonitor: ContextMonitor
 
     private var order: String {
         switch meal {
@@ -892,6 +766,8 @@ private struct FoodAdvice: View {
 
     var body: some View {
         let topOne = mealRecommendations.topOne(for: meal)
+        let deliveryURL = topOne?.landingURL ?? URL(string: "https://waimai.meituan.com/")!
+        let nearbyURL = URL(string: meal == .afternoonTea ? "https://maps.apple.com/?q=咖啡" : "https://maps.apple.com/?q=馄饨")!
         VStack(alignment: .leading, spacing: 11) {
             VStack(alignment: .leading, spacing: 12) {
                 Text(topOne?.itemName ?? order)
@@ -903,11 +779,17 @@ private struct FoodAdvice: View {
                     Text(topOne?.deliveryText ?? "预计送达 25–35 分钟").font(.system(size: 10)).foregroundStyle(.secondary)
                 }
                 HStack(spacing: 8) {
-                    Link(destination: topOne?.landingURL ?? URL(string: "https://waimai.meituan.com/")!) {
+                    Button {
+                        contextMonitor.recordExternalAction("delivery_opened", destination: deliveryURL)
+                        NSWorkspace.shared.open(deliveryURL)
+                    } label: {
                         Label("打开美团外卖", systemImage: "arrow.up.right").frame(maxWidth: .infinity)
                     }
                     .buttonStyle(GlassActionStyle(isPrimary: true))
-                    Link(destination: URL(string: meal == .afternoonTea ? "https://maps.apple.com/?q=咖啡" : "https://maps.apple.com/?q=馄饨")!) {
+                    Button {
+                        contextMonitor.recordExternalAction("nearby_food_opened", destination: nearbyURL)
+                        NSWorkspace.shared.open(nearbyURL)
+                    } label: {
                         Label("附近堂食", systemImage: "location").frame(maxWidth: .infinity)
                     }
                     .buttonStyle(GlassActionStyle())
@@ -923,6 +805,7 @@ private struct FoodAdvice: View {
 }
 
 private struct TravelAdvice: View {
+    @ObservedObject var contextMonitor: ContextMonitor
     private let sights: [(String, String, String)] = [
         ("西湖 · 苏堤", "湖边散步 / 自然风景", "免费"),
         ("灵隐飞来峰", "山林古寺 / 文化历史", "示例 ¥45"),
@@ -968,7 +851,11 @@ private struct TravelAdvice: View {
                 Label("Day 2　灵隐飞来峰 → 茶叶博物馆 → 返程", systemImage: "2.circle")
             }
             .font(.system(size: 9)).foregroundStyle(.secondary)
-            Link(destination: URL(string: "https://maps.apple.com/?q=杭州西湖")!) {
+            Button {
+                let url = URL(string: "https://maps.apple.com/?q=杭州西湖")!
+                contextMonitor.recordExternalAction("travel_map_opened", destination: url)
+                NSWorkspace.shared.open(url)
+            } label: {
                 Label("在地图中查看行程", systemImage: "map").frame(maxWidth: .infinity)
             }
             .buttonStyle(GlassActionStyle(isPrimary: true))
