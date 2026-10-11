@@ -1,7 +1,9 @@
 import AppKit
+import AVKit
 import Combine
 import CoreGraphics
 import SwiftUI
+import WebKit
 
 @main
 struct CikeApp: App {
@@ -396,7 +398,12 @@ private struct RecommendationPopover: View {
                 AICoverSetupAdvice(generation: aiCoverGeneration)
             } else {
                 switch scene {
-                case .content: ContentAdvice(article: sspaiTopOne.article, contentStore: sspaiTopOne, aiCoverGeneration: aiCoverGeneration, contextMonitor: contextMonitor)
+                case .content:
+                    if let projects = sspaiTopOne.article?.githubProjects {
+                        GitHubTrendingAdvice(projects: projects, contextMonitor: contextMonitor)
+                    } else {
+                        ContentAdvice(article: sspaiTopOne.article, contentStore: sspaiTopOne, aiCoverGeneration: aiCoverGeneration, contextMonitor: contextMonitor)
+                    }
                 case .breath: BreathAdvice()
                 case .breakReminder: BreakReminderAdvice(minutes: contextMonitor.continuousUseMinutes)
                 case .lunch: FoodAdvice(meal: .lunch, mealRecommendations: mealRecommendations, contextMonitor: contextMonitor)
@@ -422,7 +429,10 @@ private struct RecommendationPopover: View {
         .background(PopoverWindowCornerRadius(
             radius: 18,
             onPresentation: beginPresentation,
-            onDismissal: contextMonitor.endPresentation
+            onDismissal: {
+                contextMonitor.endPresentation()
+                sspaiTopOne.clearPresentation()
+            }
         ))
     }
 
@@ -456,7 +466,7 @@ private struct RecommendationPopover: View {
 
     private var subtitle: String {
         switch scene {
-        case .content: "留一篇好内容慢慢读"
+        case .content: sspaiTopOne.article?.githubProjects == nil ? "留一篇好内容慢慢读" : "看看本周热门项目"
         case .breath: "需要换换气么"
         case .breakReminder: "连续用太久了，休息一下"
         case .lunch: "来一份午餐吧"
@@ -532,60 +542,172 @@ private struct BreakReminderAdvice: View {
     }
 }
 
+private struct GitHubTrendingAdvice: View {
+    let projects: [GitHubTrendingProject]
+    @ObservedObject var contextMonitor: ContextMonitor
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("GitHub 本周热门 Top 3")
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(CikePalette.primaryText)
+                .padding(.bottom, 2)
+
+            ForEach(projects.indices, id: \.self) { index in
+                let project = projects[index]
+                Button {
+                    contextMonitor.recordExternalAction("github_project_opened", destination: project.url)
+                    NSWorkspace.shared.open(project.url)
+                } label: {
+                    HStack(alignment: .top, spacing: 11) {
+                        Text("\(index + 1)")
+                            .font(.system(size: 12, weight: .semibold, design: .rounded))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 19, height: 23)
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text(project.name)
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(CikePalette.primaryText)
+                                .lineLimit(2)
+                            Text(project.summary)
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .lineLimit(3)
+                            HStack(spacing: 7) {
+                                if let language = project.language { Text(language) }
+                                if let stars = project.weeklyStars { Text("本周新增 \(stars) Stars") }
+                            }
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                        }
+                        Spacer(minLength: 2)
+                        Image(systemName: "arrow.up.right")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .padding(.top, 3)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(12)
+                    .background(CikePalette.cardSurface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("打开第 \(index + 1) 名项目 \(project.name)")
+            }
+        }
+        .frame(minHeight: 96, alignment: .top)
+    }
+}
+
 private struct ContentAdvice: View {
     var article: SspaiArticle?
     @ObservedObject var contentStore: SspaiTopOneStore
     @ObservedObject var aiCoverGeneration: AICoverGeneration
     @ObservedObject var contextMonitor: ContextMonitor
+    @StateObject private var videoState = ContentVideoState()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             if let article {
-                if let coverURL = aiCoverGeneration.imageURL(for: article) ?? article.coverURL {
-                    AsyncImage(url: coverURL, transaction: Transaction(animation: .easeInOut(duration: 0.18))) { phase in
-                        switch phase {
-                        case .success(let image):
-                            image
-                                .resizable()
-                                .scaledToFill()
-                        case .failure:
-                            coverPlaceholder(for: article, failedToLoadOriginal: true)
-                        default:
+                if let videoURL = article.videoURL, videoState.hasStarted {
+                    InlineContentVideo(videoURL: videoURL, articleURL: article.url,
+                                       player: videoState.player, isPlaying: videoState.isPlaying)
+                        .id(article.url)
+                        .frame(height: 190)
+                        .overlay(alignment: videoState.isPlaying ? .bottomTrailing : .center) {
+                            Button { videoState.toggle(videoURL) } label: {
+                                Image(systemName: videoState.isPlaying ? "pause.fill" : "play.fill")
+                                    .font(.system(size: videoState.isPlaying ? 12 : 19))
+                                    .foregroundStyle(.white)
+                                    .frame(width: videoState.isPlaying ? 34 : 48,
+                                           height: videoState.isPlaying ? 34 : 48)
+                                    .background(.black.opacity(0.65), in: Circle())
+                                    .frame(maxWidth: .infinity, maxHeight: .infinity,
+                                           alignment: videoState.isPlaying ? .bottomTrailing : .center)
+                                    .padding(videoState.isPlaying ? 10 : 0)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(videoState.isPlaying ? "暂停视频" : "继续播放视频")
+                        }
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                } else {
+                    ZStack {
+                        if let coverURL = aiCoverGeneration.imageURL(for: article) ?? article.coverURL {
+                            AsyncImage(url: coverURL, transaction: Transaction(animation: .easeInOut(duration: 0.18))) { phase in
+                                switch phase {
+                                case .success(let image):
+                                    image.resizable().scaledToFill()
+                                case .failure:
+                                    coverPlaceholder(for: article, failedToLoadOriginal: true)
+                                default:
+                                    coverPlaceholder(for: article, failedToLoadOriginal: false)
+                                }
+                            }
+                        } else {
                             coverPlaceholder(for: article, failedToLoadOriginal: false)
+                        }
+                        if let videoURL = article.videoURL {
+                            Button { videoState.toggle(videoURL) } label: {
+                                Image(systemName: "play.fill")
+                                    .font(.system(size: 19))
+                                    .foregroundStyle(.white)
+                                    .frame(width: 48, height: 48)
+                                    .background(.black.opacity(0.65), in: Circle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("播放视频")
                         }
                     }
                     .frame(maxWidth: .infinity)
-                    .frame(height: 118)
+                    .frame(height: article.videoURL == nil ? 118 : 190)
                     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                } else {
-                    coverPlaceholder(for: article, failedToLoadOriginal: false)
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 118)
                 }
             }
-            Text(article?.title ?? "正在为你找一篇值得读的内容。")
+            Text(article?.title ?? emptyTitle)
                 .font(.system(size: 18, weight: .semibold))
                 .foregroundStyle(CikePalette.primaryText)
                 .fixedSize(horizontal: false, vertical: true)
                 .lineSpacing(3)
-            Text(article?.metadataText.isEmpty == false ? article!.metadataText : "内容加载后会附上原文链接。")
+            Text(article?.metadataText.isEmpty == false ? article!.metadataText : emptyDetail)
                 .font(.system(size: 12)).foregroundStyle(.secondary)
             if let article {
                 Button {
                     contextMonitor.recordExternalAction("article_opened", destination: article.url)
                     NSWorkspace.shared.open(article.url)
                 } label: {
-                    Label("阅读原文", systemImage: "arrow.up.right")
+                    Label(article.videoURL == nil ? "阅读原文" : "观看原视频", systemImage: "arrow.up.right")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(GlassActionStyle(isPrimary: true))
             }
         }
         .frame(minHeight: 96, alignment: .top)
+        .onChange(of: article?.url) { _, _ in
+            videoState.reset()
+        }
+        .onDisappear { videoState.pause() }
         .task(id: "\(article?.url.absoluteString ?? "")|\(contentStore.isCheckingCover)|\(aiCoverGeneration.hasAPIKey)") {
             if let article, !contentStore.isCheckingCover {
                 aiCoverGeneration.generateIfNeeded(for: article)
             }
+        }
+    }
+
+    private var emptyTitle: String {
+        switch contentStore.lastLoadResult {
+        case .exhausted: "暂时没有新的推荐了。"
+        case .unavailable: "暂时没能获取新内容。"
+        case .loaded, nil: "正在为你找一篇值得读的内容。"
+        }
+    }
+
+    private var emptyDetail: String {
+        switch contentStore.lastLoadResult {
+        case .exhausted: "有新内容时，再来看看。"
+        case .unavailable: "稍后再点开试试。"
+        case .loaded, nil: "内容加载后会附上原文链接。"
         }
     }
 
@@ -636,6 +758,118 @@ private struct ContentAdvice: View {
                     .task { aiCoverGeneration.generateIfNeeded(for: article, force: true) }
             }
         }
+    }
+}
+
+@MainActor
+private final class ContentVideoState: ObservableObject {
+    @Published var isPlaying = false
+    @Published var hasStarted = false
+    let player = AVPlayer()
+    private var loadedURL: URL?
+
+    func toggle(_ url: URL) {
+        if loadedURL != url {
+            if url.host == "www.youtube.com" || url.host == "www.youtube-nocookie.com" {
+                player.replaceCurrentItem(with: nil)
+            } else {
+                player.replaceCurrentItem(with: AVPlayerItem(url: url))
+            }
+            loadedURL = url
+        }
+        hasStarted = true
+        if isPlaying {
+            pause()
+        } else {
+            player.play()
+            isPlaying = true
+        }
+    }
+
+    func pause() {
+        player.pause()
+        isPlaying = false
+    }
+
+    func reset() {
+        pause()
+        player.replaceCurrentItem(with: nil)
+        loadedURL = nil
+        hasStarted = false
+    }
+}
+
+private struct InlineContentVideo: View {
+    let videoURL: URL
+    let articleURL: URL
+    let player: AVPlayer
+    let isPlaying: Bool
+
+    var body: some View {
+        Group {
+            if videoURL.host == "www.youtube.com" || videoURL.host == "www.youtube-nocookie.com" {
+                EmbeddedYouTubeVideo(videoURL: videoURL, articleURL: articleURL, isPlaying: isPlaying)
+            } else {
+                NativeContentVideo(player: player)
+            }
+        }
+    }
+}
+
+private struct NativeContentVideo: NSViewRepresentable {
+    let player: AVPlayer
+
+    func makeNSView(context: Context) -> AVPlayerView {
+        let view = AVPlayerView()
+        view.player = player
+        view.controlsStyle = .none
+        view.videoGravity = .resizeAspect
+        return view
+    }
+
+    func updateNSView(_ nsView: AVPlayerView, context: Context) {
+        if nsView.player !== player { nsView.player = player }
+    }
+}
+
+private struct EmbeddedYouTubeVideo: NSViewRepresentable {
+    let videoURL: URL
+    let articleURL: URL
+    let isPlaying: Bool
+
+    func makeNSView(context: Context) -> WKWebView {
+        let configuration = WKWebViewConfiguration()
+        configuration.mediaTypesRequiringUserActionForPlayback = []
+        let webView = WKWebView(frame: .zero, configuration: configuration)
+        webView.underPageBackgroundColor = .black
+        var components = URLComponents(url: videoURL, resolvingAgainstBaseURL: false)
+        let existingQueryItems = components?.queryItems ?? []
+        components?.queryItems = existingQueryItems + [
+            URLQueryItem(name: "enablejsapi", value: "1"),
+            URLQueryItem(name: "autoplay", value: isPlaying ? "1" : "0"),
+            URLQueryItem(name: "playsinline", value: "1")
+        ]
+        let embedURL = components?.url ?? videoURL
+        let html = """
+        <!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+        <style>html,body{margin:0;width:100%;height:100%;background:#111}iframe{border:0;width:100%;height:100%}</style>
+        <script>
+        var wantedPlaying = \(isPlaying ? "true" : "false");
+        function setPlaying(playing) {
+          wantedPlaying = playing;
+          var frame = document.getElementById('video');
+          if (frame && frame.contentWindow) {
+            frame.contentWindow.postMessage(JSON.stringify({event:'command',func:playing?'playVideo':'pauseVideo',args:[]}), '*');
+          }
+        }
+        </script></head><body><iframe id="video" src="\(embedURL.absoluteString)" onload="setPlaying(wantedPlaying)" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen referrerpolicy="strict-origin-when-cross-origin"></iframe></body></html>
+        """
+        webView.loadHTMLString(html, baseURL: articleURL)
+        return webView
+    }
+
+    func updateNSView(_ nsView: WKWebView, context: Context) {
+        nsView.evaluateJavaScript("setPlaying(\(isPlaying ? "true" : "false"))", completionHandler: nil)
     }
 }
 
