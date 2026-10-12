@@ -5,14 +5,16 @@ enum ContentLoadResult: Equatable {
     case loaded, exhausted, unavailable
 }
 
-/// Rotates the newest unseen public article from each editorial source.
+/// Rotates four kinds of public content, selecting one unseen item per opening.
 /// It uses public feeds and home pages only; no browser cookies or account data are read.
 @MainActor
 final class SspaiTopOneStore: ObservableObject {
     @Published private(set) var article: SspaiArticle?
+    @Published private(set) var categoryTitle: String?
     @Published private(set) var isCheckingCover = false
     @Published private(set) var lastLoadResult: ContentLoadResult?
-    private let sourcesInRoundKey = "Cike.contentSourcesInRound"
+    private let lastCategoryKey = "Cike.lastContentCategory"
+    private let sourcesInRoundPrefix = "Cike.contentSourcesInRound"
     private let cacheTTL: TimeInterval = 20 * 60
     private let retryInterval: TimeInterval = 90
     private var isLoading = false
@@ -32,15 +34,84 @@ final class SspaiTopOneStore: ObservableObject {
         let generation = presentationGeneration
         defer { if presentationGeneration == generation { isLoading = false } }
         article = nil
+        categoryTitle = nil
         isCheckingCover = false
         lastLoadResult = nil
 
-        let sources = ContentSource.allCases
         var foundContent = false
+        let categories = ContentCategory.allCases
+        let previous = UserDefaults.standard.string(forKey: lastCategoryKey)
+            .flatMap(ContentCategory.init(rawValue:))
+        let start = previous.flatMap { categories.firstIndex(of: $0) }.map { ($0 + 1) % categories.count } ?? 0
+
+        for offset in 0..<categories.count {
+            let category = categories[(start + offset) % categories.count]
+            let sources = ContentSource.allCases.filter { $0.category == category }
+            let preferred = await candidateArticles(from: sources.filter(\.isPrimary))
+            foundContent = foundContent || preferred.hasContent
+            var candidates = preferred.items
+            if candidates.isEmpty {
+                let fallback = await candidateArticles(from: sources.filter { !$0.isPrimary })
+                foundContent = foundContent || fallback.hasContent
+                candidates = fallback.items
+            }
+            guard presentationGeneration == generation else { return .unavailable }
+            guard !candidates.isEmpty else { continue }
+
+            let roundKey = "\(sourcesInRoundPrefix).\(category.rawValue)"
+            let completedSources = Set(UserDefaults.standard.stringArray(forKey: roundKey) ?? [])
+            let remaining = candidates.filter { !completedSources.contains($0.source.rawValue) }
+            let pool = remaining.isEmpty ? candidates : remaining
+            guard let next = pool.max(by: { left, right in
+                let leftDate = PublishedDate.parse(left.article.date) ?? .distantPast
+                let rightDate = PublishedDate.parse(right.article.date) ?? .distantPast
+                return leftDate == rightDate ? left.source.index > right.source.index : leftDate < rightDate
+            }) else { continue }
+
+            history.record(next.article.url, source: next.source.rawValue)
+            let round = remaining.isEmpty ? [] : Array(completedSources)
+            UserDefaults.standard.set(round + [next.source.rawValue], forKey: roundKey)
+            UserDefaults.standard.set(category.rawValue, forKey: lastCategoryKey)
+            categoryTitle = category.title
+            isCheckingCover = next.source != .githubTrending
+            article = next.article
+            lastLoadResult = .loaded
+            if next.source == .githubTrending {
+                Task { [weak self] in
+                    await self?.enrichGitHubDescriptions(next.article)
+                }
+            } else {
+                Task { [weak self] in
+                    await self?.enrich(next.article, from: next.source)
+                }
+            }
+            Task { [weak self] in
+                await self?.warmContentPool()
+            }
+            return .loaded
+        }
+
+        let result: ContentLoadResult = foundContent ? .exhausted : .unavailable
+        lastLoadResult = result
+        return result
+    }
+
+    func clearPresentation() {
+        presentationGeneration += 1
+        isLoading = false
+        article = nil
+        categoryTitle = nil
+        isCheckingCover = false
+        lastLoadResult = nil
+    }
+
+    private func candidateArticles(from sources: [ContentSource]) async ->
+        (items: [(source: ContentSource, article: SspaiArticle)], hasContent: Bool) {
         let tasks = sources.map { source in
             Task { (source, await self.articles(for: source)) }
         }
-        var candidates: [(source: ContentSource, article: SspaiArticle)] = []
+        var foundContent = false
+        var items: [(source: ContentSource, article: SspaiArticle)] = []
         for task in tasks {
             let (source, articles) = await task.value
             guard !articles.isEmpty else { continue }
@@ -52,55 +123,10 @@ final class SspaiTopOneStore: ObservableObject {
                     let rightDate = PublishedDate.parse(right.element.date) ?? .distantPast
                     return leftDate == rightDate ? left.offset > right.offset : leftDate < rightDate
                 })?.element {
-                candidates.append((source, article))
+                items.append((source, article))
             }
         }
-        guard presentationGeneration == generation else { return .unavailable }
-        guard !candidates.isEmpty else {
-            let result: ContentLoadResult = foundContent ? .exhausted : .unavailable
-            lastLoadResult = result
-            return result
-        }
-
-        let completedSources = Set(UserDefaults.standard.stringArray(forKey: sourcesInRoundKey) ?? [])
-        let remaining = candidates.filter { !completedSources.contains($0.source.rawValue) }
-        let pool = remaining.isEmpty ? candidates : remaining
-        guard let next = pool.max(by: { left, right in
-            let leftDate = PublishedDate.parse(left.article.date) ?? .distantPast
-            let rightDate = PublishedDate.parse(right.article.date) ?? .distantPast
-            return leftDate == rightDate ? left.source.index > right.source.index : leftDate < rightDate
-        }) else {
-            lastLoadResult = .unavailable
-            return .unavailable
-        }
-
-        history.record(next.article.url, source: next.source.rawValue)
-        let round = remaining.isEmpty ? [] : Array(completedSources)
-        UserDefaults.standard.set(round + [next.source.rawValue], forKey: sourcesInRoundKey)
-        isCheckingCover = next.source != .githubTrending
-        article = next.article
-        lastLoadResult = .loaded
-        if next.source == .githubTrending {
-            Task { [weak self] in
-                await self?.enrichGitHubDescriptions(next.article)
-            }
-        } else {
-            Task { [weak self] in
-                await self?.enrich(next.article, from: next.source)
-            }
-        }
-        Task { [weak self] in
-            await self?.warmContentPool()
-        }
-        return .loaded
-    }
-
-    func clearPresentation() {
-        presentationGeneration += 1
-        isLoading = false
-        article = nil
-        isCheckingCover = false
-        lastLoadResult = nil
+        return (items, foundContent)
     }
 
     private func articles(for source: ContentSource) async -> [SspaiArticle] {
@@ -125,7 +151,12 @@ final class SspaiTopOneStore: ObservableObject {
     }
 
     private func warmContentPool() async {
-        let tasks = ContentSource.allCases.map { source in
+        let categories = ContentCategory.allCases
+        let previous = UserDefaults.standard.string(forKey: lastCategoryKey)
+            .flatMap(ContentCategory.init(rawValue:))
+        let index = previous.flatMap { categories.firstIndex(of: $0) }.map { ($0 + 1) % categories.count } ?? 0
+        let next = categories[index]
+        let tasks = ContentSource.allCases.filter { $0.category == next && $0.isPrimary }.map { source in
             Task { await self.articles(for: source) }
         }
         for task in tasks {
@@ -191,7 +222,7 @@ private enum PublishedDate {
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = TimeZone(secondsFromGMT: 0)
         for format in ["EEE, dd MMM yyyy HH:mm:ss Z", "EEE, d MMM yyyy HH:mm:ss Z",
-                       "EEE, dd MMM yyyy HH:mm Z", "yyyy-MM-dd"] {
+                       "EEE, dd MMM yyyy HH:mm:ss zzz", "EEE, dd MMM yyyy HH:mm Z", "yyyy-MM-dd"] {
             formatter.dateFormat = format
             if let date = formatter.date(from: raw) { return date }
         }
@@ -199,12 +230,38 @@ private enum PublishedDate {
     }
 }
 
+private enum ContentCategory: String, CaseIterable {
+    case learn, world, inspiration, fun
+
+    var title: String {
+        switch self {
+        case .learn: "长点见识"
+        case .world: "看看世界"
+        case .inspiration: "找点灵感"
+        case .fun: "轻松一下"
+        }
+    }
+}
+
 private enum ContentSource: String, CaseIterable {
-    case sspai, quanta, nasa, smithsonian, publicDomainReview, itsNiceThat
-    case colossal, pudding, jstorDaily, youtube, kidShouldSeeThis, githubTrending
+    case sspai, quanta, nasa, smithsonian, smithsonianTravel, smithsonianHistory
+    case guardianTravel, publicDomainReview, itsNiceThat, creativeBoom, designboom
+    case colossal, pudding, youtube, youtubeFun, kidShouldSeeThis
+    case githubTrending, xkcd, nealFun
 
     var index: Int { Self.allCases.firstIndex(of: self) ?? 0 }
-    var needsChineseTitle: Bool { self != .sspai }
+    var needsChineseTitle: Bool { ![.sspai, .nealFun].contains(self) }
+    var category: ContentCategory {
+        switch self {
+        case .sspai, .quanta, .nasa, .smithsonian, .youtube, .githubTrending: .learn
+        case .smithsonianTravel, .smithsonianHistory, .guardianTravel, .publicDomainReview: .world
+        case .itsNiceThat, .creativeBoom, .designboom, .colossal, .pudding: .inspiration
+        case .youtubeFun, .kidShouldSeeThis, .xkcd, .nealFun: .fun
+        }
+    }
+    var isPrimary: Bool {
+        ![.publicDomainReview, .pudding].contains(self)
+    }
 
     func loadArticles() async -> [SspaiArticle] {
         switch self {
@@ -217,27 +274,39 @@ private enum ContentSource: String, CaseIterable {
             return await Self.loadNASA()
         case .smithsonian:
             return await Self.loadRSS(url: "https://www.smithsonianmag.com/rss/science-nature/", source: "Smithsonian Magazine")
+        case .smithsonianTravel:
+            return await Self.loadRSS(url: "https://www.smithsonianmag.com/rss/travel/", source: "Smithsonian · 旅行")
+        case .smithsonianHistory:
+            return await Self.loadRSS(url: "https://www.smithsonianmag.com/rss/history/", source: "Smithsonian · 历史")
+        case .guardianTravel:
+            return await Self.loadRSS(url: "https://www.theguardian.com/travel/all/rss", source: "The Guardian · 旅行")
         case .publicDomainReview:
             return await Self.loadRSS(url: "https://publicdomainreview.org/rss.xml", source: "The Public Domain Review")
         case .itsNiceThat:
-            return await Self.loadRSS(url: "https://www.itsnicethat.com/articles.atom", source: "It’s Nice That")
+            return await Self.loadRSS(url: "https://www.itsnicethat.com/articles.atom", source: "It’s Nice That") { item in
+                !(item.link ?? "").contains("sponsored-content")
+            }
+        case .creativeBoom:
+            return await Self.loadRSS(url: "https://www.creativeboom.com/feed/", source: "Creative Boom")
+        case .designboom:
+            return await Self.loadRSS(url: "https://www.designboom.com/feed/", source: "Designboom")
         case .colossal:
             return await Self.loadRSS(url: "https://www.thisiscolossal.com/feed/", source: "Colossal")
         case .pudding:
             return await Self.loadRSS(url: "https://pudding.cool/rss.xml", source: "The Pudding")
-        case .jstorDaily:
-            return await Self.loadRSS(url: "https://daily.jstor.org/feed/", source: "JSTOR Daily") { item in
-                !Set(item.categories.map { $0.lowercased() }).isDisjoint(with: [
-                    "arts & culture", "plants & animals", "natural science", "science & technology", "social history"
-                ])
-            }
         case .youtube:
-            return await Self.loadYouTube()
+            return await Self.loadYouTubeChannel("UCsooa4yRKGN_zEE8iknghZA", name: "TED-Ed")
+        case .youtubeFun:
+            return await Self.loadYouTubeChannel("UCY1kMZp36IQSyNx_9h4mpCg", name: "Mark Rober")
         case .kidShouldSeeThis:
             return await Self.loadRSS(url: "https://thekidshouldseethis.com/feed", source: "The Kid Should See This")
                 .filter { $0.videoURL != nil && $0.coverURL != nil }
         case .githubTrending:
             return await Self.loadGitHubTrending()
+        case .xkcd:
+            return await Self.loadXKCD()
+        case .nealFun:
+            return Self.loadNealFun()
         }
     }
 
@@ -260,16 +329,6 @@ private enum ContentSource: String, CaseIterable {
                              date: today, githubProjects: projects)]
     }
 
-    static func loadYouTube() async -> [SspaiArticle] {
-        async let tedEd = loadYouTubeChannel("UCsooa4yRKGN_zEE8iknghZA", name: "TED-Ed")
-        async let markRober = loadYouTubeChannel("UCY1kMZp36IQSyNx_9h4mpCg", name: "Mark Rober")
-        let channels = await [tedEd, markRober]
-        // Alternate channels so a frequent uploader does not occupy every recommendation.
-        return (0..<8).flatMap { index in
-            channels.compactMap { articles in articles.indices.contains(index) ? articles[index] : nil }
-        }
-    }
-
     static func loadYouTubeChannel(_ id: String, name: String) async -> [SspaiArticle] {
         var components = URLComponents(string: "https://www.youtube.com/feeds/videos.xml")
         components?.queryItems = [URLQueryItem(name: "channel_id", value: id)]
@@ -285,6 +344,58 @@ private enum ContentSource: String, CaseIterable {
             return SspaiArticle(title: SspaiArticle.htmlText(title), url: articleURL,
                                 source: "YouTube · \(name)", coverURL: coverURL,
                                 date: item.date, videoURL: videoURL)
+        }
+    }
+
+    static func loadXKCD() async -> [SspaiArticle] {
+        guard let latest = await loadXKCDComic(number: nil) else { return [] }
+        let numbers = (max(1, latest.num - 5)..<latest.num).reversed()
+        let tasks = numbers.map { number in Task { await loadXKCDComic(number: number) } }
+        var comics = [latest]
+        for task in tasks {
+            if let comic = await task.value { comics.append(comic) }
+        }
+        return comics.compactMap { comic in
+            guard let imageURL = URL(string: comic.img), imageURL.scheme == "https",
+                  let url = URL(string: "https://xkcd.com/\(comic.num)/") else { return nil }
+            let month = comic.month.count == 1 ? "0\(comic.month)" : comic.month
+            let day = comic.day.count == 1 ? "0\(comic.day)" : comic.day
+            return SspaiArticle(title: comic.title, url: url, source: "xkcd 漫画",
+                                coverURL: imageURL, date: "\(comic.year)-\(month)-\(day)")
+        }
+    }
+
+    private struct XKCDComic: Decodable {
+        let num: Int
+        let title: String
+        let img: String
+        let year: String
+        let month: String
+        let day: String
+    }
+
+    private static func loadXKCDComic(number: Int?) async -> XKCDComic? {
+        let path = number.map { "\($0)/" } ?? ""
+        guard let url = URL(string: "https://xkcd.com/\(path)info.0.json") else { return nil }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 7
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let response = response as? HTTPURLResponse,
+                  (200...299).contains(response.statusCode) else { return nil }
+            return try JSONDecoder().decode(XKCDComic.self, from: data)
+        } catch { return nil }
+    }
+
+    static func loadNealFun() -> [SspaiArticle] {
+        [
+            ("用四种元素创造一个世界", "https://neal.fun/infinite-craft/"),
+            ("坐电梯，一路探索到太空", "https://neal.fun/space-elevator/"),
+            ("往下滑，看看深海里有什么", "https://neal.fun/deep-sea/")
+        ].compactMap { item in
+            let (title, rawURL) = item
+            guard let url = URL(string: rawURL) else { return nil }
+            return SspaiArticle(title: title, url: url, source: "Neal.fun · 互动体验", coverURL: nil)
         }
     }
 
@@ -458,6 +569,11 @@ struct SspaiArticle {
     }
 
     var metadataText: String { [source, date, author, readingTime].compactMap { $0 }.joined(separator: " · ") }
+    var actionTitle: String {
+        if url.host == "neal.fun" { return "打开互动体验" }
+        if url.host == "xkcd.com" { return "查看漫画" }
+        return videoURL == nil ? "阅读原文" : "观看原视频"
+    }
 
     func with(details: Details) -> SspaiArticle {
         SspaiArticle(title: title, url: url, source: source, coverURL: coverURL, date: details.date, author: details.author, readingTime: details.readingTime, videoURL: videoURL, githubProjects: githubProjects)

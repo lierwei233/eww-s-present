@@ -466,7 +466,7 @@ private struct RecommendationPopover: View {
 
     private var subtitle: String {
         switch scene {
-        case .content: sspaiTopOne.article?.githubProjects == nil ? "留一篇好内容慢慢读" : "看看本周热门项目"
+        case .content: sspaiTopOne.categoryTitle ?? "留一篇好内容慢慢读"
         case .breath: "需要换换气么"
         case .breakReminder: "连续用太久了，休息一下"
         case .lunch: "来一份午餐吧"
@@ -677,7 +677,7 @@ private struct ContentAdvice: View {
                     contextMonitor.recordExternalAction("article_opened", destination: article.url)
                     NSWorkspace.shared.open(article.url)
                 } label: {
-                    Label(article.videoURL == nil ? "阅读原文" : "观看原视频", systemImage: "arrow.up.right")
+                    Label(article.actionTitle, systemImage: "arrow.up.right")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(GlassActionStyle(isPrimary: true))
